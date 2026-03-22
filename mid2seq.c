@@ -332,6 +332,20 @@ int main(int argc, char *argv[]) {
     fwrite(&be_mspb, 4, 1, seq_file);
   }
 
+  // --- Write Bank Select for all channels ---
+  // The Saturn sound driver requires CC#32 (Bank Select LSB) to select
+  // which tone bank to use.  Bank 1 is the user's tone data.
+  // Without this, the driver defaults to bank 0 (driver internals).
+  {
+    uint8_t bank = 1;  // Bank 1 = user tone data
+    for (int ch = 0; ch < 16; ch++) {
+      fputc(0xB0 | ch, seq_file);  // CC status
+      fputc(0x20, seq_file);       // CC#32 = Bank Select LSB
+      fputc(bank, seq_file);       // Bank 1
+      fputc(0x00, seq_file);       // Delta time = 0
+    }
+  }
+
   // --- Write Normal Track ---
   uint32_t last_event_time = 0;
   for (int i = 0; i < event_count; i++) {
