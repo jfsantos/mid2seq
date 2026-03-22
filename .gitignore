@@ -1,0 +1,14 @@
+# Compiled binary
+mid2seq
+*.o
+
+# Generated outputs
+*.wav
+*.html
+
+# Python
+__pycache__/
+*.pyc
+
+# System
+.DS_Store
