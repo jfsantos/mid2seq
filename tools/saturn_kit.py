@@ -24,7 +24,7 @@ import json
 import sys
 import os
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 # ── Waveform Generators ─────────────────────────────────────────────
 
@@ -232,6 +232,22 @@ CYCLE_LENGTH = cycle_length_for_note(69)  # 100 samples
 
 
 @dataclass
+class FMOperator:
+    """One FM operator (modulator or carrier)."""
+    freq_ratio: float = 1.0   # frequency ratio to base note
+    level: float = 1.0        # output level (0.0-1.0 → maps to TL)
+    ar: int = 31
+    d1r: int = 0
+    dl: int = 0
+    d2r: int = 0
+    rr: int = 14
+    mdl: int = 0              # modulation depth (0-15, 0-4=off)
+    mod_source: int = -1      # which operator (layer index) modulates this one
+    feedback: float = 0.0     # self-feedback (0.0-1.0)
+    is_carrier: bool = True   # carrier=audible, modulator=silent
+
+
+@dataclass
 class InstrumentDef:
     """Definition of an instrument in the Saturn kit."""
     name: str
@@ -240,7 +256,7 @@ class InstrumentDef:
     base_note: int = 69    # MIDI note for unity pitch (A4)
     loop: bool = True      # whether to loop
     cycle_length: int = CYCLE_LENGTH  # samples per cycle (for single-cycle waves)
-    # SCSP envelope
+    # SCSP envelope (used for single-layer PCM instruments)
     ar: int = 31           # attack rate (31 = instant)
     d1r: int = 0
     dl: int = 0
@@ -251,14 +267,74 @@ class InstrumentDef:
     # For drum samples (non-looped, generated at sample_rate)
     is_drum: bool = False
     drum_note: int = 60    # fixed MIDI note for this drum
+    # FM synthesis: if fm_ops is set, this instrument uses FM instead of PCM
+    fm_ops: Optional[List[FMOperator]] = None
 
 
 # Default kit: 16 programs covering basic GM-like instruments + drums
 # Program numbers = voice indices in the TON file. The Saturn sound
 # driver maps MIDI program number directly to TON voice index.
 # Musicians use these program numbers in their DAW.
+#
+# FM instruments use 2 layers (modulator + carrier) sharing a single
+# sine wave sample. PCM instruments use 1 layer with a custom waveform.
 DEFAULT_KIT = [
-    # Melodic instruments (single-cycle, looped)
+    # ── FM instruments (2-op, share one sine wave sample) ──
+    InstrumentDef('Piano',      0, 'sine', fm_ops=[
+        FMOperator(freq_ratio=2.0, level=0.9, ar=31, d1r=12, dl=8, rr=14,
+                   is_carrier=False),                               # modulator
+        FMOperator(freq_ratio=1.0, level=0.8, ar=31, d1r=6, dl=2, rr=12,
+                   mdl=9, mod_source=0),                            # carrier
+    ]),
+    InstrumentDef('E.Piano',    1, 'sine', fm_ops=[
+        FMOperator(freq_ratio=14.0, level=0.4, ar=31, d1r=14, dl=12, rr=16,
+                   is_carrier=False),
+        FMOperator(freq_ratio=1.0, level=0.7, ar=31, d1r=10, dl=6, rr=14,
+                   is_carrier=False, mdl=8, mod_source=0),
+        FMOperator(freq_ratio=1.0, level=0.8, ar=31, d1r=4, dl=2, rr=12,
+                   mdl=9, mod_source=1),
+    ]),
+    InstrumentDef('Organ',      2, 'sine', fm_ops=[
+        FMOperator(freq_ratio=1.0, level=0.7, ar=31, d1r=0, dl=0, rr=20,
+                   is_carrier=False, feedback=0.6),
+        FMOperator(freq_ratio=1.0, level=0.8, ar=31, d1r=0, dl=0, rr=20,
+                   mdl=8, mod_source=0),
+    ]),
+    InstrumentDef('Strings',    3, 'sine', fm_ops=[
+        FMOperator(freq_ratio=1.002, level=0.5, ar=20, d1r=0, dl=0, rr=16,
+                   is_carrier=False),
+        FMOperator(freq_ratio=1.0, level=0.7, ar=18, d1r=0, dl=0, rr=14,
+                   mdl=7, mod_source=0),
+    ]),
+    InstrumentDef('Brass',      4, 'sine', fm_ops=[
+        FMOperator(freq_ratio=1.0, level=0.8, ar=24, d1r=4, dl=2, rr=14,
+                   is_carrier=False, feedback=0.3),
+        FMOperator(freq_ratio=1.0, level=0.8, ar=22, d1r=2, dl=0, rr=14,
+                   mdl=9, mod_source=0),
+    ]),
+    InstrumentDef('Bass',       8, 'sine', base_note=45, fm_ops=[
+        FMOperator(freq_ratio=1.0, level=0.9, ar=31, d1r=14, dl=10, rr=14,
+                   is_carrier=False, feedback=0.2),
+        FMOperator(freq_ratio=1.0, level=0.9, ar=31, d1r=6, dl=4, rr=14,
+                   mdl=10, mod_source=0),
+    ]),
+    # ── PCM instruments (single-cycle waveforms, 1 layer each) ──
+    InstrumentDef('Flute',      5, 'flute',   base_note=69, ar=28, d1r=0, dl=0, rr=18),
+    InstrumentDef('Saw Lead',   6, 'sawtooth',base_note=69, ar=31, d1r=0, dl=0, rr=16),
+    InstrumentDef('Sq Lead',    7, 'square',  base_note=69, ar=31, d1r=0, dl=0, rr=16),
+    InstrumentDef('Syn Bass',   9, 'sawtooth',base_note=45, ar=31, d1r=8, dl=6, rr=14),
+    InstrumentDef('Pad',       10, 'strings', base_note=69, ar=16, d1r=0, dl=0, rr=12),
+    InstrumentDef('Triangle',  11, 'triangle',base_note=69, ar=31, d1r=0, dl=0, rr=16),
+    # ── Drum sounds (one-shot PCM, 1 layer each) ──
+    InstrumentDef('Kick',      12, 'kick',  is_drum=True, drum_note=36, loop=False, ar=31, rr=31),
+    InstrumentDef('Snare',     13, 'snare', is_drum=True, drum_note=38, loop=False, ar=31, rr=31),
+    InstrumentDef('Hi-Hat',    14, 'hihat', is_drum=True, drum_note=42, loop=False, ar=31, rr=31),
+    InstrumentDef('Crash',     15, 'crash', is_drum=True, drum_note=49, loop=False, ar=31, rr=31),
+]
+
+# PCM-only kit: all single-cycle waveforms, no FM.
+# Same program numbers as the FM kit for compatibility.
+PCM_KIT = [
     InstrumentDef('Piano',      0, 'piano',   base_note=69, ar=31, d1r=8, dl=4, rr=12),
     InstrumentDef('E.Piano',    1, 'sine',    base_note=69, ar=31, d1r=10, dl=6, rr=14),
     InstrumentDef('Organ',      2, 'organ',   base_note=69, ar=31, d1r=0, dl=0, rr=20),
@@ -271,7 +347,6 @@ DEFAULT_KIT = [
     InstrumentDef('Syn Bass',   9, 'sawtooth',base_note=45, ar=31, d1r=8, dl=6, rr=14),
     InstrumentDef('Pad',       10, 'strings', base_note=69, ar=16, d1r=0, dl=0, rr=12),
     InstrumentDef('Triangle',  11, 'triangle',base_note=69, ar=31, d1r=0, dl=0, rr=16),
-    # Drum sounds (one-shot, not looped)
     InstrumentDef('Kick',      12, 'kick',  is_drum=True, drum_note=36, loop=False, ar=31, rr=31),
     InstrumentDef('Snare',     13, 'snare', is_drum=True, drum_note=38, loop=False, ar=31, rr=31),
     InstrumentDef('Hi-Hat',    14, 'hihat', is_drum=True, drum_note=42, loop=False, ar=31, rr=31),
@@ -290,68 +365,150 @@ def float_to_int16(samples, amplitude=0.9):
     return pcm
 
 
+def _make_layer(sa_offset, lsa, lea, loop, base_note, ar, d1r, dl, d2r, rr,
+                tl=0, disdl=7, mdl=0, fmcb=False, fm_layer=-1):
+    """Build a 32-byte TON layer entry."""
+    layer = bytearray(0x20)
+    layer[0x00] = 0            # start_note
+    layer[0x01] = 127          # end_note
+    lpctl = 1 if loop else 0
+    # byte 2: FMCB at bit 5
+    if fmcb:
+        layer[0x02] |= (1 << 5)
+    layer[0x03] = (lpctl << 5) | ((sa_offset >> 16) & 0xF)
+    struct.pack_into('>H', layer, 0x04, sa_offset & 0xFFFF)
+    struct.pack_into('>H', layer, 0x06, lsa)
+    struct.pack_into('>H', layer, 0x08, lea)
+    layer[0x0A] = (d2r & 0x1F) << 3 | (d1r >> 2) & 0x7
+    layer[0x0B] = (d1r & 0x3) << 6 | (ar & 0x1F)
+    layer[0x0C] = (0 << 3) | (dl >> 3) & 0x3
+    layer[0x0D] = (dl & 0x7) << 5 | (rr & 0x1F)
+    layer[0x0F] = tl & 0xFF
+    # byte 10: MDL and MDXSL/MDYSL (set to 0 here, driver computes from fm_layer)
+    layer[0x10] = (mdl & 0xF) << 4
+    # byte 17: ISEL=0, IMXL=7 (for DSP effect routing)
+    layer[0x17] = (0 << 3) | 7
+    layer[0x18] = (disdl & 0x7) << 5  # DIPAN=0 (center)
+    layer[0x19] = base_note & 0x7F
+    layer[0x1A] = 0  # fine_tune
+    # byte 1B: FM generator/layer links
+    if fm_layer >= 0:
+        layer[0x1B] = (1 << 7) | (fm_layer & 0x7F)  # fm_gen1=1, fm_layer1
+    return bytes(layer)
+
+
 def build_ton(instruments: List[InstrumentDef]) -> bytes:
     """Build a TON file from instrument definitions."""
-    # Generate PCM for each instrument
     voices = []
     pcm_chunks = []
-    pcm_offset = 0  # will be adjusted after header
+    pcm_offset = 0  # adjusted later to include header
+
+    # All FM instruments share a single sine wave sample
+    sine_cl = cycle_length_for_note(69)  # A4 base, ~100 samples
+    sine_samples = gen_sine(sine_cl)
+    sine_pcm = float_to_int16(sine_samples)
+    sine_pcm_offset = None  # set on first FM instrument
 
     for inst in instruments:
-        if inst.is_drum:
-            # Drum: generate full sample at sample rate
+        if inst.fm_ops:
+            # ── FM instrument: multi-layer voice ──
+            # All operators use the same shared sine wave sample.
+            # First FM instrument allocates the sine PCM.
+            if sine_pcm_offset is None:
+                sine_pcm_offset = pcm_offset
+                pcm_chunks.append(sine_pcm)
+                pcm_offset += len(sine_pcm)
+
+            layers_data = []
+            n_ops = len(inst.fm_ops)
+
+            for oi, op in enumerate(inst.fm_ops):
+                # Compute base_note for this operator's frequency ratio.
+                # The sine sample is tuned to A4 (note 69). The ratio shifts pitch.
+                # base_note tells the driver what note this layer plays at unity.
+                # A ratio of 2.0 = one octave up = base_note - 12
+                if op.freq_ratio > 0:
+                    ratio_semitones = round(12 * math.log2(op.freq_ratio))
+                    op_base_note = max(0, min(127, 69 - ratio_semitones))
+                else:
+                    op_base_note = 69
+
+                # TL from level (0.0=loudest → TL=0, lower level → higher TL)
+                tl = max(0, min(255, int((1.0 - op.level) * 128)))
+
+                # Find modulator layer index for fm_layer1 field
+                fm_layer_idx = -1
+                if op.mod_source is not None and op.mod_source >= 0:
+                    fm_layer_idx = op.mod_source
+
+                layer = _make_layer(
+                    sa_offset=sine_pcm_offset,
+                    lsa=0, lea=sine_cl, loop=True,
+                    base_note=op_base_note,
+                    ar=op.ar, d1r=op.d1r, dl=op.dl, d2r=op.d2r, rr=op.rr,
+                    tl=tl,
+                    disdl=7 if op.is_carrier else 0,  # modulators are silent
+                    mdl=op.mdl,
+                    fmcb=op.is_carrier,
+                    fm_layer=fm_layer_idx,
+                )
+                layers_data.append(layer)
+
+            # Voice header (4 bytes) + all layers
+            voice_hdr = bytearray(4)
+            voice_hdr[0] = 2  # bend_range = 2
+            voice_hdr[2] = struct.pack('b', n_ops - 1)[0]  # nlayers - 1
+            voices.append(bytes(voice_hdr) + b''.join(layers_data))
+
+        elif inst.is_drum:
+            # ── Drum: one-shot PCM ──
             gen = WAVEFORM_GENERATORS[inst.waveform]
             samples_float = gen(SAMPLE_RATE)
             pcm = float_to_int16(samples_float)
             n_samples = len(samples_float)
-            lsa = 0
-            lea = n_samples
-            base_note = inst.drum_note
-            loop = False
+
+            layer = _make_layer(
+                sa_offset=pcm_offset, lsa=0, lea=n_samples, loop=False,
+                base_note=inst.drum_note,
+                ar=inst.ar, d1r=inst.d1r, dl=inst.dl, d2r=inst.d2r, rr=inst.rr,
+                tl=inst.tl, disdl=inst.disdl,
+            )
+            voice_hdr = bytearray(4)
+            voice_hdr[0] = 2
+            voice_hdr[2] = 0
+            voices.append(bytes(voice_hdr) + layer)
+            pcm_chunks.append(pcm)
+            pcm_offset += len(pcm)
+
         else:
-            # Melodic: single-cycle waveform, looped.
-            # Cycle length computed so the waveform plays at the correct
-            # pitch on the SCSP at 44100 Hz (OCT=0, FNS=0).
+            # ── Melodic PCM: single-cycle waveform ──
             cl = cycle_length_for_note(inst.base_note)
             gen = WAVEFORM_GENERATORS[inst.waveform]
             samples_float = gen(cl)
             pcm = float_to_int16(samples_float)
-            n_samples = cl
-            lsa = 0
-            lea = n_samples
-            base_note = inst.base_note
-            loop = inst.loop
 
-        # Layer entry (32 bytes)
-        layer = bytearray(0x20)
-        layer[0x00] = 0           # start_note
-        layer[0x01] = 127         # end_note
-        lpctl = 1 if loop else 0
-        layer[0x03] = (lpctl << 5) | ((pcm_offset >> 16) & 0xF)
-        struct.pack_into('>H', layer, 0x04, pcm_offset & 0xFFFF)
-        struct.pack_into('>H', layer, 0x06, lsa)
-        struct.pack_into('>H', layer, 0x08, lea)
-        layer[0x0A] = (inst.d2r & 0x1F) << 3 | (inst.d1r >> 2) & 0x7
-        layer[0x0B] = (inst.d1r & 0x3) << 6 | (inst.ar & 0x1F)
-        layer[0x0C] = (0 << 3) | (inst.dl >> 3) & 0x3  # KRS=0
-        layer[0x0D] = (inst.dl & 0x7) << 5 | (inst.rr & 0x1F)
-        layer[0x0F] = inst.tl & 0xFF
-        layer[0x18] = (inst.disdl & 0x7) << 5  # DIPAN=0 (center)
-        layer[0x19] = base_note & 0x7F
-        layer[0x1A] = 0  # fine_tune
-
-        # Voice entry (4-byte header + layer)
-        voice_hdr = bytearray(4)
-        voice_hdr[0] = 2  # bend_range = 2
-        voice_hdr[2] = 0  # nlayers - 1 = 0
-        voices.append(bytes(voice_hdr) + bytes(layer))
-
-        pcm_chunks.append(pcm)
-        pcm_offset += len(pcm)
+            layer = _make_layer(
+                sa_offset=pcm_offset, lsa=0, lea=cl, loop=inst.loop,
+                base_note=inst.base_note,
+                ar=inst.ar, d1r=inst.d1r, dl=inst.dl, d2r=inst.d2r, rr=inst.rr,
+                tl=inst.tl, disdl=inst.disdl,
+            )
+            voice_hdr = bytearray(4)
+            voice_hdr[0] = 2
+            voice_hdr[2] = 0
+            voices.append(bytes(voice_hdr) + layer)
+            pcm_chunks.append(pcm)
+            pcm_offset += len(pcm)
 
     # VL table (from mechs.ton — known good)
     vl = struct.pack('bbBbbBbbBb', 25, 16, 54, 9, 49, 102, 19, 93, 122, 43)
-    mixer = bytes([0x00] * 0x12)
+    # Mixer: 18 bytes controlling EFSDL/EFPAN for EFREG[0-15] + EXTS[0-1].
+    # EFSDL routes DSP effect output to speakers. Without this, DSP runs
+    # but output is muted.  Format per byte: [7:5]=EFSDL, [4:0]=EFPAN.
+    # Channels 0,2 = left (EFPAN=0x1F), channels 1,3 = right (EFPAN=0x0F).
+    mixer = bytearray(0x12)
+    mixer[0] = (7 << 5) | 0x1F   # EFREG0 → left, full level
+    mixer[1] = (7 << 5) | 0x0F   # EFREG1 → right, full level
     peg = bytes([0x00] * 0x0A)
     plfo = bytes([0x00] * 0x04)
 
@@ -373,14 +530,15 @@ def build_ton(instruments: List[InstrumentDef]) -> bytes:
 
     # Adjust SA in each voice layer to include pcm_base
     adjusted_voices = []
-    sa_running = pcm_base
     for i, v in enumerate(voices):
         va = bytearray(v)
-        # Layer starts at byte 4
-        old_sa = ((va[4 + 0x03] & 0xF) << 16) | struct.unpack('>H', va[4 + 0x04:4 + 0x06])[0]
-        new_sa = pcm_base + old_sa
-        va[4 + 0x03] = (va[4 + 0x03] & 0xF0) | ((new_sa >> 16) & 0xF)
-        struct.pack_into('>H', va, 4 + 0x04, new_sa & 0xFFFF)
+        nlayers = struct.unpack('b', bytes([va[2]]))[0] + 1
+        for li in range(nlayers):
+            loff = 4 + li * 0x20
+            old_sa = ((va[loff + 0x03] & 0xF) << 16) | struct.unpack('>H', va[loff + 0x04:loff + 0x06])[0]
+            new_sa = pcm_base + old_sa
+            va[loff + 0x03] = (va[loff + 0x03] & 0xF0) | ((new_sa >> 16) & 0xF)
+            struct.pack_into('>H', va, loff + 0x04, new_sa & 0xFFFF)
         adjusted_voices.append(bytes(va))
 
     # Build header
@@ -612,6 +770,8 @@ def main():
         description='Generate a Saturn Sound Kit (TON + SF2)')
     parser.add_argument('-o', '--output', default='saturn_kit',
                         help='Output base name (produces NAME.ton + NAME.sf2)')
+    parser.add_argument('--mode', choices=['pcm', 'fm'], default='fm',
+                        help='Kit mode: pcm=single-cycle waveforms only, fm=FM synthesis + PCM drums (default: fm)')
     parser.add_argument('--config', help='JSON config file for custom instruments')
     parser.add_argument('--save-config', help='Save default instrument config to JSON')
     parser.add_argument('--list-waveforms', action='store_true',
@@ -625,8 +785,9 @@ def main():
         return
 
     if args.save_config:
-        save_config(DEFAULT_KIT, args.save_config)
-        print(f"[config] Saved default config to {args.save_config}")
+        kit = PCM_KIT if args.mode == 'pcm' else DEFAULT_KIT
+        save_config(kit, args.save_config)
+        print(f"[config] Saved {args.mode} config to {args.save_config}")
         print(f"  Edit this file to customize, then: python3 saturn_kit.py --config {args.save_config}")
         return
 
@@ -634,9 +795,12 @@ def main():
     if args.config:
         instruments = load_config(args.config)
         print(f"[config] Loaded {len(instruments)} instruments from {args.config}")
+    elif args.mode == 'pcm':
+        instruments = PCM_KIT
+        print(f"[kit] Using PCM kit ({len(instruments)} instruments, single-cycle waveforms)")
     else:
         instruments = DEFAULT_KIT
-        print(f"[kit] Using default kit ({len(instruments)} instruments)")
+        print(f"[kit] Using FM kit ({len(instruments)} instruments, FM synthesis + PCM drums)")
 
     # Build TON
     ton_data = build_ton(instruments)

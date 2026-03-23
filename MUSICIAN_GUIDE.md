@@ -186,6 +186,52 @@ python3 tools/tonview.py saturn_kit.ton
 open saturn_kit.html    # Click a layer, then click the piano keys
 ```
 
+## FM vs PCM Kits
+
+The Saturn Sound Kit comes in two modes:
+
+### FM Kit (default)
+```bash
+python3 tools/saturn_kit.py -o kit/saturn_kit              # or explicitly:
+python3 tools/saturn_kit.py --mode fm -o kit/saturn_kit
+```
+
+Uses the SCSP's built-in **FM synthesis** for melodic instruments (programs 0-5, 8). Each FM voice has two or more layers — a silent modulator that shifts the carrier's waveform, creating rich, evolving timbres from a single shared sine wave. Drums (programs 12-15) remain PCM samples.
+
+FM instruments sound noticeably richer on the Saturn than in the SF2 preview. The SF2 can't simulate FM — it just plays the raw sine wave. The Saturn's hardware does the phase modulation in real time.
+
+### PCM Kit
+```bash
+python3 tools/saturn_kit.py --mode pcm -o kit/saturn_kit
+```
+
+Uses single-cycle waveforms (sine, sawtooth, square, etc.) for all instruments. Each voice is one looped sample. Simpler, chiptune-like character. What you hear in the SF2 preview closely matches the Saturn output.
+
+### Which to choose?
+
+| | FM Kit | PCM Kit |
+|---|---|---|
+| Sound quality | Richer, more expressive | Simple, retro |
+| SF2 preview accuracy | Low (can't preview FM) | High |
+| Slots per voice | 2-3 (mod+carrier) | 1 |
+| Max simultaneous notes | ~12-16 | ~28-32 |
+| Best for | More complex instruments | Chiptune style |
+
+Both kits use the same program numbers, so the same MIDI works with either TON file.
+
+### Previewing FM Patches
+
+The FM simulator renders patches to WAV using the same math as the Saturn:
+
+```bash
+python3 tools/fm_sim.py --list                    # List available patches
+python3 tools/fm_sim.py --patch epiano            # Render electric piano
+python3 tools/fm_sim.py --patch bell --note 72    # Render bell at C5
+python3 tools/fm_sim.py --all                     # Render all presets to fm_renders/
+```
+
+This gives a better preview of FM instruments than the SF2 can.
+
 ## Customizing the Instrument Kit
 
 Don't like the default sounds? There are two ways to customize:
