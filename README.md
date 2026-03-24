@@ -36,7 +36,7 @@ See **[MUSICIAN_GUIDE.md](MUSICIAN_GUIDE.md)** for the full composing and export
 ## Two Kit Modes
 
 ### FM Kit (`--mode fm`, default)
-Uses the SCSP's built-in **FM synthesis** for melodic instruments. Each FM voice has a modulator and carrier layer sharing a single sine wave sample — DX7-style phase modulation creates rich timbres like electric piano, brass, organ, and bells at near-zero RAM cost. Drums remain PCM one-shot samples.
+Uses the SCSP's built-in **FM synthesis** for melodic instruments. Each FM voice has modulator and carrier layers — DX7-style phase modulation creates rich timbres like electric piano, brass, organ, and bells. Unlike the DX7, each operator can use a **different waveform** (sine, sawtooth, square, triangle, organ, brass, strings, piano, flute, bass, or custom WAV), and operators support configurable **loop points** and **loop modes** (forward, reverse, ping-pong). Drums remain PCM one-shot samples.
 
 ### PCM Kit (`--mode pcm`)
 Uses **single-cycle waveforms** (sine, sawtooth, square, etc.) for all instruments. Simpler, chiptune-like character. Each instrument is one looped waveform.
@@ -54,6 +54,7 @@ Both kits use the same program numbers (0-15) so MIDI files work with either.
 | `tools/fm_editor.py` | **FM Patch Editor** — browser-based editor with real-time SCSP emulation via WebAssembly |
 | `tools/fm_sim.py` | FM synthesis simulator — renders FM patches to WAV for auditioning |
 | `tools/dx7_to_saturn.py` | DX7 SysEx → Saturn FM patch converter (experimental — most patches need manual tweaking) |
+| `tools/merge_patches.py` | Merge multiple VST patch exports into one `saturn_kit.py` config |
 | `tools/gen_kit_demo.py` | Generates a demo MIDI using all kit instruments |
 
 ## Pre-built Kit

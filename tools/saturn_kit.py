@@ -245,6 +245,10 @@ class FMOperator:
     mod_source: int = -1      # which operator (layer index) modulates this one
     feedback: float = 0.0     # self-feedback (0.0-1.0)
     is_carrier: bool = True   # carrier=audible, modulator=silent
+    waveform: str = 'sine'    # waveform name (key into WAVEFORM_GENERATORS)
+    loop_mode: int = 1        # 0=off, 1=forward, 2=reverse, 3=ping-pong
+    loop_start: int = 0       # LSA (sample index)
+    loop_end: int = -1        # LEA (sample index, -1 = waveform length)
 
 
 @dataclass
@@ -403,51 +407,68 @@ def build_ton(instruments: List[InstrumentDef]) -> bytes:
     pcm_chunks = []
     pcm_offset = 0  # adjusted later to include header
 
-    # All FM instruments share a single sine wave sample
-    sine_cl = cycle_length_for_note(69)  # A4 base, ~100 samples
-    sine_samples = gen_sine(sine_cl)
-    sine_pcm = float_to_int16(sine_samples)
-    sine_pcm_offset = None  # set on first FM instrument
+    # Waveform cache: maps waveform name → (pcm_offset, cycle_length)
+    # Deduplicates waveforms so operators sharing the same waveform share PCM data.
+    wave_cache = {}  # waveform_name → (pcm_offset_in_chunks, cycle_length)
+
+    def get_wave_pcm(wave_name):
+        """Get or generate a waveform's PCM data and return (pcm_offset, cycle_length)."""
+        nonlocal pcm_offset
+        if wave_name in wave_cache:
+            return wave_cache[wave_name]
+
+        gen = WAVEFORM_GENERATORS.get(wave_name, gen_sine)
+        cl = cycle_length_for_note(69)  # base note A4
+        samples_float = gen(cl)
+        pcm = float_to_int16(samples_float)
+
+        off = pcm_offset
+        pcm_chunks.append(pcm)
+        pcm_offset += len(pcm)
+        wave_cache[wave_name] = (off, cl)
+        return (off, cl)
 
     for inst in instruments:
         if inst.fm_ops:
             # ── FM instrument: multi-layer voice ──
-            # All operators use the same shared sine wave sample.
-            # First FM instrument allocates the sine PCM.
-            if sine_pcm_offset is None:
-                sine_pcm_offset = pcm_offset
-                pcm_chunks.append(sine_pcm)
-                pcm_offset += len(sine_pcm)
-
+            # Each operator can use a different waveform.
             layers_data = []
             n_ops = len(inst.fm_ops)
 
             for oi, op in enumerate(inst.fm_ops):
+                # Get waveform PCM for this operator
+                wave_name = getattr(op, 'waveform', 'sine') or 'sine'
+                wave_pcm_offset, wave_cl = get_wave_pcm(wave_name.lower())
+
+                # Loop points (per-operator override or waveform defaults)
+                lsa = getattr(op, 'loop_start', 0) or 0
+                lea = getattr(op, 'loop_end', -1)
+                if lea is None or lea < 0:
+                    lea = wave_cl
+                loop = getattr(op, 'loop_mode', 1) != 0
+
                 # Compute base_note for this operator's frequency ratio.
-                # The sine sample is tuned to A4 (note 69). The ratio shifts pitch.
-                # base_note tells the driver what note this layer plays at unity.
-                # A ratio of 2.0 = one octave up = base_note - 12
                 if op.freq_ratio > 0:
                     ratio_semitones = round(12 * math.log2(op.freq_ratio))
                     op_base_note = max(0, min(127, 69 - ratio_semitones))
                 else:
                     op_base_note = 69
 
-                # TL from level (0.0=loudest → TL=0, lower level → higher TL)
+                # TL from level
                 tl = max(0, min(255, int((1.0 - op.level) * 128)))
 
-                # Find modulator layer index for fm_layer1 field
+                # Modulator layer index
                 fm_layer_idx = -1
                 if op.mod_source is not None and op.mod_source >= 0:
                     fm_layer_idx = op.mod_source
 
                 layer = _make_layer(
-                    sa_offset=sine_pcm_offset,
-                    lsa=0, lea=sine_cl, loop=True,
+                    sa_offset=wave_pcm_offset,
+                    lsa=lsa, lea=lea, loop=loop,
                     base_note=op_base_note,
                     ar=op.ar, d1r=op.d1r, dl=op.dl, d2r=op.d2r, rr=op.rr,
                     tl=tl,
-                    disdl=7 if op.is_carrier else 0,  # modulators are silent
+                    disdl=7 if op.is_carrier else 0,
                     mdl=op.mdl,
                     fmcb=op.is_carrier,
                     fm_layer=fm_layer_idx,
@@ -712,12 +733,56 @@ def build_sf2(instruments: List[InstrumentDef]) -> bytes:
 # ── Config File Support ─────────────────────────────────────────────
 
 def load_config(path: str) -> List[InstrumentDef]:
-    """Load instrument definitions from a JSON config file."""
+    """Load instrument definitions from a JSON config file.
+
+    Supports two formats:
+    1. Basic: per-instrument waveform/envelope params (original saturn_kit format)
+    2. FM ops: per-instrument fm_ops array (from VST plugin / fm_editor export)
+    """
     with open(path) as f:
         cfg = json.load(f)
 
     instruments = []
     for item in cfg.get('instruments', []):
+        # Check for FM operators (from VST/editor export)
+        fm_ops_data = item.get('fm_ops')
+        fm_ops = None
+        if fm_ops_data:
+            fm_ops = []
+            for op in fm_ops_data:
+                fm_ops.append(FMOperator(
+                    freq_ratio=op.get('freq_ratio', 1.0),
+                    level=op.get('level', 0.8),
+                    ar=op.get('ar', 31),
+                    d1r=op.get('d1r', 0),
+                    dl=op.get('dl', 0),
+                    d2r=op.get('d2r', 0),
+                    rr=op.get('rr', 14),
+                    mdl=op.get('mdl', 0),
+                    mod_source=op.get('mod_source', -1),
+                    feedback=op.get('feedback', 0.0),
+                    is_carrier=op.get('is_carrier', True),
+                    waveform=op.get('waveform', 'sine'),
+                    loop_mode=op.get('loop_mode', 1),
+                    loop_start=op.get('loop_start', 0),
+                    loop_end=op.get('loop_end', -1),
+                ))
+
+        # Use envelope from first carrier op if FM, else from item directly
+        if fm_ops:
+            carrier = next((op for op in fm_ops if op.is_carrier), fm_ops[-1])
+            ar = carrier.ar
+            d1r = carrier.d1r
+            dl = carrier.dl
+            d2r = carrier.d2r
+            rr = carrier.rr
+        else:
+            ar = item.get('ar', 31)
+            d1r = item.get('d1r', 0)
+            dl = item.get('dl', 0)
+            d2r = item.get('d2r', 0)
+            rr = item.get('rr', 14)
+
         instruments.append(InstrumentDef(
             name=item['name'],
             program=item.get('program', len(instruments)),
@@ -725,15 +790,12 @@ def load_config(path: str) -> List[InstrumentDef]:
             base_note=item.get('base_note', 69),
             loop=item.get('loop', True),
             cycle_length=item.get('cycle_length', CYCLE_LENGTH),
-            ar=item.get('ar', 31),
-            d1r=item.get('d1r', 0),
-            dl=item.get('dl', 0),
-            d2r=item.get('d2r', 0),
-            rr=item.get('rr', 14),
+            ar=ar, d1r=d1r, dl=dl, d2r=d2r, rr=rr,
             tl=item.get('tl', 0),
             disdl=item.get('disdl', 7),
             is_drum=item.get('is_drum', False),
             drum_note=item.get('drum_note', 60),
+            fm_ops=fm_ops,
         ))
     return instruments
 
@@ -818,11 +880,43 @@ def main():
     print(f"\n[ton] {ton_path} ({len(ton_data)} bytes)")
     print(f"[sf2] {sf2_path} ({len(sf2_data)} bytes)")
     print(f"\nInstruments ({len(instruments)}):")
+    total_slots_per_note = 0
+    slot_details = []
     for inst in instruments:
+        n_layers = len(inst.fm_ops) if inst.fm_ops else 1
+        slots_str = f"{n_layers} slot{'s' if n_layers > 1 else ''}/note"
         drum_str = f" (drum, note={inst.drum_note})" if inst.is_drum else ""
+        fm_str = f" FM {n_layers}-op" if inst.fm_ops else ""
         print(f"  Program {inst.program:3d}: {inst.name:12s}  "
-              f"waveform={inst.waveform:10s}  "
-              f"AR={inst.ar} D1R={inst.d1r} DL={inst.dl} RR={inst.rr}{drum_str}")
+              f"waveform={inst.waveform:10s}  {slots_str}{fm_str}"
+              f"  AR={inst.ar} D1R={inst.d1r} DL={inst.dl} RR={inst.rr}{drum_str}")
+        total_slots_per_note += n_layers
+        slot_details.append((inst.name, n_layers))
+
+    # Polyphony analysis
+    print(f"\n[polyphony] SCSP slot budget: 32 slots total")
+    max_slots = max(n for _, n in slot_details) if slot_details else 1
+    min_slots = min(n for _, n in slot_details) if slot_details else 1
+    if max_slots == min_slots:
+        max_poly = 32 // max_slots
+        print(f"  All instruments use {max_slots} slot{'s' if max_slots > 1 else ''}/note"
+              f" → max {max_poly} simultaneous notes")
+    else:
+        print(f"  Slots per note by instrument:")
+        for name, n in slot_details:
+            poly = 32 // n
+            print(f"    {name:12s}: {n} slot{'s' if n > 1 else ''}"
+                  f" → max {poly} notes if playing alone")
+        # Estimate: if each instrument plays 1 note simultaneously
+        if total_slots_per_note > 32:
+            print(f"\n  WARNING: Playing all {len(instruments)} instruments simultaneously"
+                  f" uses {total_slots_per_note} slots (exceeds 32).")
+            print(f"  You may hear note-stealing if too many channels play at once.")
+        else:
+            remaining = 32 - len(instruments) * min_slots
+            print(f"\n  With 1 note per instrument: {len(instruments) * min_slots}-"
+                  f"{total_slots_per_note} slots used,"
+                  f" {32 - total_slots_per_note}-{remaining} remaining for polyphony")
 
     print(f"\nUsage:")
     print(f"  1. Load {sf2_path} in your DAW")

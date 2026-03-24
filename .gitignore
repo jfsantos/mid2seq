@@ -5,6 +5,8 @@ mid2seq
 # Generated outputs
 *.wav
 *.html
+# Exception: VST UI HTML is source, not generated
+!tools/scsp_vst/ui/index.html
 
 # Python
 __pycache__/

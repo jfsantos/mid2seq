@@ -4,27 +4,55 @@ This guide walks you through composing and exporting music for Saturn homebrew g
 
 ## What You Need
 
-- **Any DAW or MIDI editor** (Reaper, Logic, FL Studio, LMMS, MuseScore, even GarageBand)
+- **Any DAW** (Reaper, Logic, FL Studio, Ableton, Ardour, etc.)
 - **Python 3** (for the conversion tools)
-- **fluidsynth** (optional, for previewing audio — `brew install fluid-synth` or `apt install fluidsynth`)
+- **Emscripten** (optional, only if building the SCSP WASM engine — `brew install emscripten`)
 
-## Quick Start
+## Two Ways to Compose
+
+### Option A: SCSP FM Synth VST (Recommended)
+
+Compose directly with hardware-accurate Saturn FM synthesis in your DAW. What you hear is what plays on real hardware.
 
 ```bash
-# 1. Generate the Saturn Sound Kit (do this once)
+# 1. Build the VST plugin (once)
+cd tools/scsp_vst && make
+cp -R bin/scsp-fm-synth.vst3 ~/Library/Audio/Plug-Ins/VST3/  # macOS
+# Or copy to your platform's VST3 directory
+
+# 2. In your DAW: load "SCSP FM Synth" on each MIDI track
+#    Choose a preset (Electric Piano, Brass, Organ, etc.)
+#    Set the Program Number for each instance (0-15)
+#    Compose your music, export as Format 0 MIDI
+
+# 3. Export patches: click "Copy JSON" on each VST instance, save to files
+#    Merge into one config:
+python3 tools/merge_patches.py piano.json bass.json brass.json -o my_kit.json
+
+# 4. Build the Saturn sound kit
+python3 tools/saturn_kit.py --config my_kit.json -o my_kit
+
+# 5. Convert MIDI to SEQ
+./mid2seq my_song.mid my_song.seq
+
+# 6. Ship my_kit.ton + my_song.seq + CUSTOM.MAP with your game
+```
+
+### Option B: SoundFont Preview (Simpler Setup)
+
+Use a pre-built SoundFont for composing. Faster to set up, but FM instruments won't sound as rich as on the real Saturn (the SF2 can't simulate FM synthesis).
+
+```bash
+# 1. Generate the Saturn Sound Kit (once)
 python3 tools/saturn_kit.py
 
 # 2. Load saturn_kit.sf2 into your DAW
-#    Compose your music using the instruments below
-#    Export as Format 0 MIDI
+#    Compose your music, export as Format 0 MIDI
 
-# 3. Preview how it will sound (optional)
-fluidsynth -ni -F preview.wav -r 44100 saturn_kit.sf2 my_song.mid
-
-# 4. Convert to Saturn format
+# 3. Convert to Saturn format
 ./mid2seq my_song.mid my_song.seq
 
-# 5. Done! Ship saturn_kit.ton + my_song.seq + CUSTOM.MAP with your game
+# 4. Ship saturn_kit.ton + my_song.seq + CUSTOM.MAP with your game
 ```
 
 ## Available Instruments
@@ -52,13 +80,100 @@ The Saturn Sound Kit provides 16 instruments. Use these **program numbers** in y
 
 ## Setting Up Your DAW
 
-### Loading the SoundFont
+### Using the SCSP FM Synth VST (Recommended)
+
+The SCSP FM Synth runs the actual Saturn sound chip emulator natively in your DAW. Every note you play goes through the real SCSP engine — envelopes, FM modulation, ring buffer behavior, everything is hardware-accurate.
+
+#### Installation
+
+```bash
+cd tools/scsp_vst && make
+# macOS:
+cp -R bin/scsp-fm-synth.vst3 ~/Library/Audio/Plug-Ins/VST3/
+cp -R bin/scsp-fm-synth.clap ~/Library/Audio/Plug-Ins/CLAP/
+# Linux:
+cp -R bin/scsp-fm-synth.vst3 ~/.vst3/
+cp -R bin/scsp-fm-synth.lv2 ~/.lv2/
+```
+
+Rescan plugins in your DAW. "SCSP FM Synth" should appear under the synthesizer category.
+
+#### Channel Setup
+
+Load one instance of SCSP FM Synth per instrument channel:
+
+```
+Track 1: SCSP FM Synth → Preset: Electric Piano, Program: 0
+Track 2: SCSP FM Synth → Preset: Strings, Program: 3
+Track 3: SCSP FM Synth → Preset: FM Bass, Program: 8
+Track 4: SCSP FM Synth → Preset: Brass, Program: 4
+...
+```
+
+Set a different **Program Number** on each instance (0-15). This determines the instrument's program number in the exported TON file — it must match the program changes in your MIDI.
+
+#### Designing Custom Sounds
+
+Each VST instance has a full FM editor in its WebView UI:
+
+- **Operator tabs** (1-6 operators) — click tabs to switch, each has its own ratio, level, envelope, and modulation settings
+- **Carrier/Modulator toggle** — carriers produce audio, modulators shape the timbre
+- **Mod Source dropdown** — wire any operator as a modulator for any other
+- **Per-operator waveform** — each operator can use a different waveform: Sine, Sawtooth, Square, Triangle, Organ, Brass, Strings, Piano, Flute, Bass, or a custom WAV file
+- **Loop controls** — per-operator loop mode (Off, Forward, Reverse, Ping-pong) with adjustable loop start/end points
+- **Waveform preview** — visualizes the selected waveform with highlighted loop region
+- **Custom WAV upload** — load any WAV file as an operator waveform (auto-resampled to 1024 samples for FM operators)
+- **Envelope visualization** — real-time ADSR curve with SCSP hardware rate tables
+- **12 built-in presets** — Electric Piano, Bell, Brass, Organ, FM Bass, Strings, Clavinet, Marimba, Electric Piano 2 (3-op), Metallic (3-op), 4-Op E.Piano, Sine
+
+All parameters are automatable — you can automate FM depth, envelope rates, operator ratios, or even waveform selection over time in your DAW.
+
+**Important:** FM operators (modulators and FM-modulated carriers) must use 1024-sample waveforms — the SCSP's FM math is hardcoded for this length. The plugin handles this automatically: custom WAV files loaded on FM operators are resampled to 1024 samples. Pure PCM carriers (no FM modulation) can use any waveform length with full loop control.
+
+#### Exporting Patches for Saturn
+
+When your song is ready, export each VST instance's patch for the Saturn:
+
+1. On each VST instance, click **Copy JSON**
+2. Paste into a file (e.g., `piano.json`, `bass.json`, `brass.json`)
+3. Merge all patches:
+   ```bash
+   python3 tools/merge_patches.py piano.json bass.json brass.json -o my_kit.json
+   ```
+4. Build the TON:
+   ```bash
+   python3 tools/saturn_kit.py --config my_kit.json -o my_kit
+   ```
+
+The exported JSON is in `saturn_kit.py --config` format. Each file includes the Program Number you set in the VST, so the merge tool preserves the correct instrument assignments.
+
+You can also **Paste JSON** into the VST to import patches from the FM Patch Editor or from other sources.
+
+#### Polyphony Budget
+
+The Saturn SCSP has 32 slots total. FM instruments use 2-4 slots per note (one per operator). When you build the TON, `saturn_kit.py` reports the polyphony budget:
+
+```
+[polyphony] SCSP slot budget: 32 slots total
+  Piano       : 2 slots → max 16 notes if playing alone
+  E.Piano     : 3 slots → max 10 notes if playing alone
+  Bass        : 2 slots → max 16 notes if playing alone
+  With 1 note per instrument: 6-7 slots used, 25-26 remaining for polyphony
+```
+
+Keep this in mind when arranging — dense chords on a 4-op instrument eat slots quickly.
+
+### Using the SoundFont (Alternative)
+
+If you prefer a simpler setup or your DAW doesn't support VST3/CLAP:
 
 1. Run `python3 tools/saturn_kit.py` to generate `saturn_kit.sf2`
-2. In your DAW, load `saturn_kit.sf2` as a virtual instrument (most DAWs support SF2 natively or via a plugin like sforzando, sfizz, or juicysfplugin)
+2. Load `saturn_kit.sf2` as a virtual instrument (via sforzando, sfizz, juicysfplugin, or native SF2 support)
 3. The SoundFont contains all 16 instruments at the program numbers listed above
 
-### Channel Setup
+Note: The SoundFont can't simulate FM synthesis — it plays the raw sine wave for FM instruments. The actual Saturn will sound richer. Use the SCSP FM Synth VST for accurate FM preview.
+
+### Channel Setup (Both Methods)
 
 Assign each instrument to its own MIDI channel with a Program Change at the start:
 
@@ -82,6 +197,8 @@ Channel 12: Program 15 (Crash)
 ```
 
 Each drum channel plays the drum at whatever MIDI note you send. The pitch will shift relative to the drum's base note, so middle C area works best.
+
+Note: The SCSP FM Synth VST currently handles melodic FM instruments only. For drums, use the SoundFont or PCM samples in `saturn_kit.py`.
 
 ## Composing Tips
 
@@ -209,15 +326,17 @@ Uses single-cycle waveforms (sine, sawtooth, square, etc.) for all instruments. 
 
 ### Which to choose?
 
-| | FM Kit | PCM Kit |
-|---|---|---|
-| Sound quality | Richer, more expressive | Simple, retro |
-| SF2 preview accuracy | Low (can't preview FM) | High |
-| Slots per voice | 2-3 (mod+carrier) | 1 |
-| Max simultaneous notes | ~12-16 | ~28-32 |
-| Best for | More complex instruments | Chiptune style |
+| | VST + FM Kit | SF2 + FM Kit | SF2 + PCM Kit |
+|---|---|---|---|
+| Preview accuracy | Exact (SCSP emulator) | Low (no FM in SF2) | High |
+| Sound quality | Rich FM synthesis | Rich on Saturn, flat in DAW | Simple, retro |
+| Custom sound design | Full FM editor in DAW | Edit JSON or use fm_editor.py | Edit JSON |
+| Setup complexity | Build VST once | Generate SF2 | Generate SF2 |
+| Slots per voice | 2-4 (configurable) | 2-3 (fixed per kit) | 1 |
+| Max simultaneous notes | Depends on ops/voice | ~12-16 | ~28-32 |
+| Best for | Serious FM composition | Quick prototyping | Chiptune style |
 
-Both kits use the same program numbers, so the same MIDI works with either TON file.
+All approaches produce the same TON + SEQ files for the Saturn. The VST gives the most accurate preview of what the Saturn will actually sound like.
 
 ### FM Patch Editor (Interactive, Hardware-Accurate)
 
@@ -340,6 +459,39 @@ python3 tools/sf2ton.py my_sounds.sf2 -o my_sounds.ton --seq my_song.seq
 | `hihat` | Filtered noise (drum) |
 | `crash` | Long noise decay (drum) |
 | `tom` | Pitched sine sweep (drum) |
+
+### Per-Operator Waveforms (FM Instruments)
+
+When using `fm_ops` in your JSON config (from the VST or FM editor), each operator can specify its own waveform and loop settings:
+
+```json
+{
+  "instruments": [{
+    "name": "Saw Mod Piano",
+    "program": 0,
+    "fm_ops": [
+      {
+        "freq_ratio": 2.0, "level": 0.9, "is_carrier": false,
+        "waveform": "sawtooth",
+        "loop_mode": 1, "loop_start": 0, "loop_end": 100,
+        "ar": 31, "d1r": 12, "dl": 8, "rr": 14,
+        "mdl": 0, "mod_source": -1, "feedback": 0.0
+      },
+      {
+        "freq_ratio": 1.0, "level": 0.8, "is_carrier": true,
+        "waveform": "sine",
+        "loop_mode": 1, "loop_start": 0, "loop_end": 100,
+        "ar": 31, "d1r": 6, "dl": 2, "rr": 14,
+        "mdl": 9, "mod_source": 0, "feedback": 0.0
+      }
+    ]
+  }]
+}
+```
+
+Available waveform names: `sine`, `sawtooth`, `square`, `triangle`, `organ`, `brass`, `strings`, `piano`, `flute`, `bass`. Operators sharing the same waveform name reuse the same PCM data in the TON file (no duplicate storage).
+
+Loop modes: `0` = off (one-shot), `1` = forward, `2` = reverse, `3` = ping-pong.
 
 ### Envelope Parameters
 

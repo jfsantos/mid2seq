@@ -9,7 +9,11 @@
  *        -o scsp.js scsp_wasm.c scsp.c scspdsp.c
  */
 
+#ifdef __EMSCRIPTEN__
 #include <emscripten.h>
+#else
+#define EMSCRIPTEN_KEEPALIVE
+#endif
 
 /* scsp_types.h is force-included via -include flag in the Makefile.
    It provides all types, stubs, and guard defines. */

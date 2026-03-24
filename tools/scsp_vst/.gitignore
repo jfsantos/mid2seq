@@ -1,0 +1,9 @@
+# Build outputs
+bin/
+build/
+
+# DPFWebUI submodule (cloned at build time)
+dpfwebui/
+
+# Object file dependency tracking
+*.d

@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>SCSP FM Synth</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'SF Mono', Consolas, monospace; background: #0f0f23; color: #ccc; padding: 12px; overflow: hidden; height: 100vh; display: flex; flex-direction: column; }
+h1 { color: #00d4ff; font-size: 14px; margin-bottom: 8px; display: flex; align-items: center; gap: 12px; }
+h1 select { background: #222; color: #ccc; border: 1px solid #444; padding: 3px 6px; font-family: inherit; font-size: 11px; border-radius: 3px; }
+
+/* Tabs */
+.tabs { display: flex; gap: 2px; margin-bottom: 0; }
+.tab { padding: 5px 14px; background: #1a1a2e; border: 1px solid #333; border-bottom: none;
+       border-radius: 6px 6px 0 0; cursor: pointer; font-size: 11px; color: #888; user-select: none; }
+.tab:hover { background: #2a2a4e; color: #ccc; }
+.tab.active { background: #222244; color: #00d4ff; border-color: #444; }
+.tab.carrier { color: #4a4; }
+.tab.carrier.active { color: #0f0; }
+
+/* Tab content */
+.tab-content { background: #1a1a2e; border: 1px solid #333; border-radius: 0 6px 6px 6px; padding: 10px; flex: 1; overflow-y: auto; }
+.param-row { display: flex; gap: 12px; margin-bottom: 6px; flex-wrap: wrap; }
+.param { display: flex; flex-direction: column; gap: 2px; min-width: 90px; }
+.param label { font-size: 10px; color: #888; }
+.param input[type="range"] { width: 100px; accent-color: #00d4ff; }
+.param .val { font-size: 10px; color: #00d4ff; text-align: right; min-width: 30px; }
+.param select { background: #222; color: #ccc; border: 1px solid #444; padding: 2px; font-size: 10px; font-family: inherit; border-radius: 2px; }
+.carrier-toggle { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+.carrier-toggle input { accent-color: #4a4; }
+
+/* Envelope canvas */
+#env-section { margin-top: 8px; background: #12122a; border: 1px solid #333; border-radius: 6px; padding: 8px; }
+#env-section h3 { font-size: 11px; color: #666; margin-bottom: 4px; }
+#env-canvas { width: 100%; height: 100px; display: block; border-radius: 4px; }
+
+/* Global bar */
+.global-bar { display: flex; gap: 12px; align-items: center; margin-bottom: 8px; font-size: 11px; }
+.global-bar label { color: #888; }
+.global-bar select, .global-bar input { background: #222; color: #ccc; border: 1px solid #444; padding: 2px 4px; font-family: inherit; font-size: 11px; border-radius: 2px; }
+.toolbar-btn { background: #2a2a4e; color: #ccc; border: 1px solid #444; padding: 3px 10px; cursor: pointer; border-radius: 3px; font-family: inherit; font-size: 10px; }
+.toolbar-btn:hover { background: #3a3a5e; }
+.load-wav-btn { background: #2a3a2e; color: #8c8; border: 1px solid #4a4; padding: 2px 8px; cursor: pointer; border-radius: 3px; font-family: inherit; font-size: 9px; margin-left: 4px; }
+.load-wav-btn:hover { background: #3a4a3e; }
+</style>
+</head>
+<body>
+
+<h1>
+  SCSP FM Synth
+  <select id="preset-select"></select>
+</h1>
+
+<div class="global-bar">
+  <label>Operators:</label>
+  <select id="num-ops-select">
+    <option value="1">1</option><option value="2" selected>2</option><option value="3">3</option>
+    <option value="4">4</option><option value="5">5</option><option value="6">6</option>
+  </select>
+  <label>Program:</label>
+  <select id="program-num-select">
+    <option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option>
+    <option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7</option>
+    <option value="8">8</option><option value="9">9</option><option value="10">10</option><option value="11">11</option>
+    <option value="12">12</option><option value="13">13</option><option value="14">14</option><option value="15">15</option>
+  </select>
+  <button id="btn-copy-json" class="toolbar-btn">Copy JSON</button>
+  <button id="btn-paste-json" class="toolbar-btn">Paste JSON</button>
+  <span id="json-status" style="font-size:10px;color:#4a4;"></span>
+</div>
+
+<div class="tabs" id="op-tabs"></div>
+<div class="tab-content" id="tab-content"></div>
+
+<div id="env-section">
+  <h3>Envelope</h3>
+  <canvas id="env-canvas"></canvas>
+</div>
+
+<script src="ui.js"></script>
+</body>
+</html>

@@ -370,7 +370,7 @@ function initPatches() {
 }
 
 function defaultOp() {
-  return { freq_ratio: 1.0, freq_fixed: 0, level: 0.8, ar: 31, d1r: 0, dl: 0, d2r: 0, rr: 14, mdl: 0, mod_source: -1, feedback: 0.0, is_carrier: true };
+  return { freq_ratio: 1.0, freq_fixed: 0, level: 0.8, ar: 31, d1r: 0, dl: 0, d2r: 0, rr: 14, mdl: 0, mod_source: -1, feedback: 0.0, is_carrier: true, waveform: 0, loop_mode: 1, loop_start: 0, loop_end: 1024 };
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -382,27 +382,73 @@ const SCSP_WASM_B64 = '__SCSP_WASM_B64__';
 __SCSP_GLUE_JS__
 
 // Sine wave sample loaded into SCSP sound RAM.
-// MUST be 1024 samples — the SCSP's FM modulation math is hardcoded
-// around a 1024-sample cycle ("smp <<= 0xA; // associate cycle with 1024").
-// At OCT=0 FNS=0, playback rate = 1 sample/output → freq = 44100/1024 ≈ 43.07 Hz.
-const SINE_CYCLE_LEN = 1024;
-const SINE_RAM_OFFSET = 0;
-const SINE_BASE_FREQ = 44100.0 / SINE_CYCLE_LEN;  // ~43.07 Hz
-const SINE_BASE_NOTE = 69 + 12 * Math.log2(SINE_BASE_FREQ / 440); // ~28.77 (F1)
+// All built-in waveforms are 1024 samples (required by SCSP FM math: smp <<= 0xA).
+const WAVE_LEN = 1024;
+const WAVE_BYTES = WAVE_LEN * 2;
+const SINE_BASE_FREQ = 44100.0 / WAVE_LEN;
+const SINE_BASE_NOTE = 69 + 12 * Math.log2(SINE_BASE_FREQ / 440);
+
+const WAVE_NAMES = ['Sine','Sawtooth','Square','Triangle','Organ','Brass','Strings','Piano','Flute','Bass'];
+const LOOP_NAMES = ['Off','Forward','Reverse','Ping-pong'];
+
+// ── JS Waveform Generators (matching scsp_waveforms.c) ──
+function genAdditive(n, harmonics) {
+    const out = new Float32Array(n);
+    for (const [h, a] of harmonics) {
+        for (let i = 0; i < n; i++) out[i] += a * Math.sin(2 * Math.PI * h * i / n);
+    }
+    let peak = 0;
+    for (let i = 0; i < n; i++) if (Math.abs(out[i]) > peak) peak = Math.abs(out[i]);
+    if (peak > 0) for (let i = 0; i < n; i++) out[i] /= peak;
+    return out;
+}
+
+function generateWaveform(type, n) {
+    switch (type) {
+    case 0: return genAdditive(n, [[1, 1.0]]);
+    case 1: return genAdditive(n, Array.from({length:15}, (_, i) => [i+1, (((i+1)%2===0)?-1:1)/(i+1)]));
+    case 2: return genAdditive(n, Array.from({length:8}, (_, i) => [2*i+1, 1.0/(2*i+1)]));
+    case 3: return genAdditive(n, Array.from({length:8}, (_, i) => [2*i+1, ((i%2===0)?1:-1)/((2*i+1)*(2*i+1))]));
+    case 4: return genAdditive(n, [[1,1],[2,0.8],[3,0.6],[4,0.3],[6,0.2],[8,0.15],[10,0.1]]);
+    case 5: return genAdditive(n, [[1,1],[2,0.3],[3,0.7],[4,0.15],[5,0.5],[6,0.1],[7,0.3],[9,0.15]]);
+    case 6: return genAdditive(n, Array.from({length:20}, (_, i) => [i+1, 1.0/Math.pow(i+1, 1.2)]));
+    case 7: return genAdditive(n, [[1,1],[2,0.7],[3,0.4],[4,0.25],[5,0.15],[6,0.1],[7,0.08],[8,0.05]]);
+    case 8: return genAdditive(n, [[1,1],[2,0.15],[3,0.05]]);
+    case 9: return genAdditive(n, [[1,1],[2,0.5],[3,0.2],[4,0.1]]);
+    default: return new Float32Array(n);
+    }
+}
+
+// ── Waveform Store: tracks waveforms loaded into SCSP RAM ──
+const waveStore = { waves: [], nextOffset: 0 };
+
+function waveStoreAdd(ramPtr, floatSamples, loopStart, loopEnd, loopMode) {
+    const offset = waveStore.nextOffset;
+    const len = floatSamples.length;
+    for (let i = 0; i < len; i++) {
+        const val = Math.round(floatSamples[i] * 32767);
+        scsp.HEAPU8[ramPtr + offset + i * 2]     = val & 0xFF;
+        scsp.HEAPU8[ramPtr + offset + i * 2 + 1] = (val >> 8) & 0xFF;
+    }
+    const id = waveStore.waves.length;
+    waveStore.waves.push({ offset, length: len, loopStart, loopEnd, loopMode });
+    waveStore.nextOffset = offset + len * 2;
+    return id;
+}
 
 async function initSCSP() {
   if (scspReady) return;
-  // Decode WASM from base64
   const wasmBytes = Uint8Array.from(atob(SCSP_WASM_B64), c => c.charCodeAt(0));
   scsp = await SCSPModule({ wasmBinary: wasmBytes.buffer });
   scsp._scsp_init();
 
-  // Load single-cycle sine wave into SCSP sound RAM (big-endian int16)
+  // Load all built-in waveforms into SCSP RAM
   const ramPtr = scsp._scsp_get_ram_ptr();
-  for (let i = 0; i < SINE_CYCLE_LEN; i++) {
-    const val = Math.round(Math.sin(2 * Math.PI * i / SINE_CYCLE_LEN) * 32767);
-    scsp.HEAPU8[ramPtr + i * 2]     = val & 0xFF;
-    scsp.HEAPU8[ramPtr + i * 2 + 1] = (val >> 8) & 0xFF;
+  waveStore.waves = [];
+  waveStore.nextOffset = 0;
+  for (let t = 0; t < WAVE_NAMES.length; t++) {
+    const samples = generateWaveform(t, WAVE_LEN);
+    waveStoreAdd(ramPtr, samples, 0, WAVE_LEN, 1);
   }
   scspReady = true;
 }
@@ -431,14 +477,29 @@ function programSlot(slot, op, midiNote, allOps) {
   // OCT is signed 4-bit (-8 to +7), encoded in bits [14:11]
   const octBits = ((octave & 0xF) << 11) | (fns & 0x3FF);
 
-  // SA = SINE_RAM_OFFSET (byte address, split across data[0] and data[1])
-  const sa = SINE_RAM_OFFSET;
+  // Look up waveform from store
+  const wid = op.waveform || 0;
+  const wav = waveStore.waves[wid] || waveStore.waves[0];
+
+  // Resolve loop points (per-op override or waveform default)
+  let lsa   = op.loop_start >= 0 ? op.loop_start : wav.loopStart;
+  let lea   = op.loop_end > 0    ? op.loop_end   : wav.loopEnd;
+  let lpctl = op.loop_mode >= 0  ? op.loop_mode  : wav.loopMode;
+  let sa    = wav.offset;
+
+  // FM constraint: modulators and FM-modulated carriers must use 1024-sample forward loop
+  const usesFM = (op.mod_source >= 0 && op.mdl >= 5) || op.feedback > 0;
+  const isMod = !op.is_carrier;
+  if (usesFM || isMod) {
+    if (wav.length !== WAVE_LEN) sa = waveStore.waves[0].offset; // fallback to sine
+    lsa = 0; lea = WAVE_LEN; lpctl = 1;
+  }
+
   const saHigh = (sa >> 16) & 0xF;
   const saLow = sa & 0xFFFF;
 
-  // data[0]: LPCTL=1 (forward loop) at bits [6:5], SA high at bits [3:0]
-  // KEYONB/KEYONEX cleared — will be set by scsp_key_on
-  const d0 = (1 << 5) | saHigh; // LPCTL=1
+  // data[0]: LPCTL at bits [6:5], SA high at bits [3:0]
+  const d0 = (lpctl << 5) | saHigh;
 
   // data[4]: D2R[15:11] | D1R[10:6] | EGHOLD[5] | AR[4:0]
   const d4 = ((op.d2r & 0x1F) << 11) | ((op.d1r & 0x1F) << 6) | (op.ar & 0x1F);
@@ -544,8 +605,8 @@ function programSlot(slot, op, midiNote, allOps) {
   // Write all slot registers
   scsp._scsp_write_slot(slot, 0x0, d0);
   scsp._scsp_write_slot(slot, 0x1, saLow);
-  scsp._scsp_write_slot(slot, 0x2, 0);           // LSA = 0
-  scsp._scsp_write_slot(slot, 0x3, SINE_CYCLE_LEN); // LEA
+  scsp._scsp_write_slot(slot, 0x2, lsa);
+  scsp._scsp_write_slot(slot, 0x3, lea);
   scsp._scsp_write_slot(slot, 0x4, d4);
   scsp._scsp_write_slot(slot, 0x5, d5);
   scsp._scsp_write_slot(slot, 0x6, d6);
@@ -1040,6 +1101,242 @@ function renderOpParams() {
 
   modGrp.appendChild(modRow);
   body.appendChild(modGrp);
+
+  // ── Waveform group ──
+  const waveGrp = document.createElement('div');
+  waveGrp.className = 'param-group';
+  const waveTitle = document.createElement('div');
+  waveTitle.className = 'param-group-title';
+  waveTitle.textContent = 'Waveform';
+  waveGrp.appendChild(waveTitle);
+  const waveRow = document.createElement('div');
+  waveRow.className = 'row';
+
+  // Waveform selector dropdown
+  const waveDiv = document.createElement('div');
+  waveDiv.className = 'param';
+  const waveLbl = document.createElement('label');
+  waveLbl.textContent = 'Waveform';
+  waveDiv.appendChild(waveLbl);
+  const waveSel = document.createElement('select');
+  WAVE_NAMES.forEach((name, wi) => {
+    const o = document.createElement('option');
+    o.value = wi; o.textContent = name;
+    if (wi === (op.waveform || 0)) o.selected = true;
+    waveSel.appendChild(o);
+  });
+  waveSel.onchange = () => {
+    op.waveform = parseInt(waveSel.value);
+    drawWaveformPreview();
+    renderOpGraph();
+  };
+  waveDiv.appendChild(waveSel);
+  waveRow.appendChild(waveDiv);
+
+  // Loop mode dropdown
+  const loopDiv = document.createElement('div');
+  loopDiv.className = 'param';
+  const loopLbl = document.createElement('label');
+  loopLbl.textContent = 'Loop Mode';
+  loopDiv.appendChild(loopLbl);
+  const loopSel = document.createElement('select');
+  LOOP_NAMES.forEach((name, li) => {
+    const o = document.createElement('option');
+    o.value = li; o.textContent = name;
+    if (li === (op.loop_mode !== undefined ? op.loop_mode : 1)) o.selected = true;
+    loopSel.appendChild(o);
+  });
+  loopSel.onchange = () => {
+    op.loop_mode = parseInt(loopSel.value);
+    drawWaveformPreview();
+  };
+  loopDiv.appendChild(loopSel);
+  waveRow.appendChild(loopDiv);
+
+  // Loop start slider
+  const waveLen = (waveStore.waves[op.waveform || 0] || {}).length || WAVE_LEN;
+  const lsDiv = document.createElement('div');
+  lsDiv.className = 'param';
+  const lsLbl = document.createElement('label');
+  lsLbl.textContent = 'Loop Start';
+  lsDiv.appendChild(lsLbl);
+  const lsInp = document.createElement('input');
+  lsInp.type = 'range'; lsInp.min = 0; lsInp.max = waveLen; lsInp.step = 1;
+  lsInp.value = op.loop_start || 0;
+  const lsVal = document.createElement('span');
+  lsVal.className = 'val'; lsVal.textContent = op.loop_start || 0;
+  lsInp.oninput = () => { op.loop_start = parseInt(lsInp.value); lsVal.textContent = op.loop_start; drawWaveformPreview(); };
+  lsDiv.appendChild(lsInp); lsDiv.appendChild(lsVal);
+  waveRow.appendChild(lsDiv);
+
+  // Loop end slider
+  const leDiv = document.createElement('div');
+  leDiv.className = 'param';
+  const leLbl = document.createElement('label');
+  leLbl.textContent = 'Loop End';
+  leDiv.appendChild(leLbl);
+  const leInp = document.createElement('input');
+  leInp.type = 'range'; leInp.min = 0; leInp.max = waveLen; leInp.step = 1;
+  leInp.value = op.loop_end || waveLen;
+  const leVal = document.createElement('span');
+  leVal.className = 'val'; leVal.textContent = op.loop_end || waveLen;
+  leInp.oninput = () => { op.loop_end = parseInt(leInp.value); leVal.textContent = op.loop_end; drawWaveformPreview(); };
+  leDiv.appendChild(leInp); leDiv.appendChild(leVal);
+  waveRow.appendChild(leDiv);
+
+  // Load WAV button
+  const loadBtn = document.createElement('button');
+  loadBtn.style.cssText = 'background:#2a3a2e;color:#8c8;border:1px solid #4a4;padding:3px 8px;cursor:pointer;border-radius:3px;font-family:inherit;font-size:10px;align-self:flex-end;';
+  loadBtn.textContent = 'Load WAV';
+  loadBtn.onclick = () => loadWavForOp(selOp);
+  waveRow.appendChild(loadBtn);
+
+  waveGrp.appendChild(waveRow);
+
+  // Waveform preview canvas
+  const wvCanvas = document.createElement('canvas');
+  wvCanvas.id = 'op-wave-preview';
+  wvCanvas.style.cssText = 'width:100%;height:60px;display:block;border-radius:4px;background:#12122a;margin-top:6px;';
+  waveGrp.appendChild(wvCanvas);
+  body.appendChild(waveGrp);
+
+  requestAnimationFrame(drawWaveformPreview);
+}
+
+// Custom waveform storage per operator
+const customWaves = {};
+
+function loadWavForOp(opIdx) {
+  const input = document.createElement('input');
+  input.type = 'file'; input.accept = '.wav,audio/wav';
+  input.onchange = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const result = parseWav(ev.target.result);
+        applyCustomWaveform(opIdx, result.samples, file.name);
+      } catch (err) { alert('WAV error: ' + err.message); }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+  input.click();
+}
+
+function parseWav(buf) {
+  const v = new DataView(buf);
+  const tag = (o) => String.fromCharCode(v.getUint8(o),v.getUint8(o+1),v.getUint8(o+2),v.getUint8(o+3));
+  if (tag(0) !== 'RIFF' || tag(8) !== 'WAVE') throw new Error('Not a WAV file');
+  let fmt = null, dOff = 0, dSize = 0, pos = 12;
+  while (pos < v.byteLength - 8) {
+    const id = tag(pos), sz = v.getUint32(pos+4, true);
+    if (id === 'fmt ') fmt = { ch: v.getUint16(pos+10,true), sr: v.getUint32(pos+12,true), bits: v.getUint16(pos+22,true) };
+    else if (id === 'data') { dOff = pos+8; dSize = sz; }
+    pos += 8 + sz; if (pos%2) pos++;
+  }
+  if (!fmt || !dOff) throw new Error('Invalid WAV');
+  const bps = fmt.bits/8, nf = Math.floor(dSize/(bps*fmt.ch));
+  const out = new Float32Array(nf);
+  for (let i = 0; i < nf; i++) {
+    const o = dOff + i*bps*fmt.ch;
+    out[i] = fmt.bits===16 ? v.getInt16(o,true)/32768 : fmt.bits===8 ? (v.getUint8(o)-128)/128 : 0;
+  }
+  return { samples: out };
+}
+
+function resampleTo(input, targetLen) {
+  const out = new Float32Array(targetLen);
+  const ratio = input.length / targetLen;
+  for (let i = 0; i < targetLen; i++) {
+    const si = i * ratio, idx = Math.floor(si), fr = si - idx;
+    out[i] = input[Math.min(idx,input.length-1)] * (1-fr) + input[Math.min(idx+1,input.length-1)] * fr;
+  }
+  return out;
+}
+
+function applyCustomWaveform(opIdx, floatSamples, filename) {
+  const patch = patches[curPatch];
+  const op = patch.operators[opIdx];
+  const usesFM = (op.mod_source >= 0 && op.mdl >= 5) || op.feedback > 0 || !op.is_carrier;
+
+  let samples = floatSamples;
+  if (usesFM && samples.length !== WAVE_LEN) {
+    samples = resampleTo(floatSamples, WAVE_LEN);
+  }
+
+  // Add to wave store in SCSP RAM
+  const ramPtr = scsp._scsp_get_ram_ptr();
+  const wid = waveStoreAdd(ramPtr, samples, 0, samples.length, 1);
+  op.waveform = wid;
+  op.loop_start = 0;
+  op.loop_end = samples.length;
+  op.loop_mode = 1;
+
+  customWaves[opIdx] = samples;
+  renderOpParams();
+  drawWaveformPreview();
+}
+
+function drawWaveformPreview() {
+  const canvas = document.getElementById('op-wave-preview');
+  if (!canvas) return;
+  const patch = patches[curPatch];
+  if (!patch.operators.length) return;
+  const op = patch.operators[selOp];
+  if (!op) return;
+
+  const rect = canvas.parentElement.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = rect.width * dpr;
+  canvas.height = 60 * dpr;
+  canvas.style.height = '60px';
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  const w = rect.width, h = 60;
+  ctx.fillStyle = '#12122a'; ctx.fillRect(0, 0, w, h);
+
+  // Get waveform samples
+  let samples;
+  if (customWaves[selOp]) {
+    samples = customWaves[selOp];
+  } else {
+    samples = generateWaveform(op.waveform || 0, WAVE_LEN);
+  }
+  const n = samples.length;
+  const lsa = op.loop_start || 0;
+  const lea = op.loop_end || n;
+  const lm = op.loop_mode !== undefined ? op.loop_mode : 1;
+
+  // Loop region
+  if (lm > 0 && lea > lsa) {
+    const lx = lsa / n * w, ex = lea / n * w;
+    ctx.fillStyle = '#1a2a1a'; ctx.fillRect(lx, 0, ex - lx, h);
+    ctx.strokeStyle = '#44aa44'; ctx.setLineDash([2,3]); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(lx, 0); ctx.lineTo(lx, h); ctx.stroke();
+    ctx.strokeStyle = '#aa4444';
+    ctx.beginPath(); ctx.moveTo(ex, 0); ctx.lineTo(ex, h); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Waveform
+  ctx.strokeStyle = '#00d4ff'; ctx.lineWidth = 1; ctx.beginPath();
+  for (let i = 0; i < n; i++) {
+    const x = i / n * w, y = h/2 - samples[i] * (h/2 - 4);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // Center line
+  ctx.strokeStyle = '#333'; ctx.setLineDash([2,4]); ctx.lineWidth = 0.5;
+  ctx.beginPath(); ctx.moveTo(0, h/2); ctx.lineTo(w, h/2); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Labels
+  ctx.fillStyle = '#555'; ctx.font = '9px monospace';
+  const isCustom = !!customWaves[selOp];
+  ctx.fillText(isCustom ? 'Custom ('+n+' smp)' : (WAVE_NAMES[op.waveform || 0] || '?'), 4, 12);
+  ctx.fillText(lm > 0 ? LOOP_NAMES[lm]+' '+lsa+'-'+lea : 'No loop', 4, h - 4);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1295,6 +1592,10 @@ function exportFile() {
       mod_source: op.mod_source,
       feedback: op.feedback,
       is_carrier: op.is_carrier,
+      waveform: WAVE_NAMES[op.waveform || 0] || 'sine',
+      loop_mode: op.loop_mode !== undefined ? op.loop_mode : 1,
+      loop_start: op.loop_start || 0,
+      loop_end: op.loop_end || WAVE_LEN,
     }))
   }));
 
@@ -1335,6 +1636,10 @@ function loadFile() {
               mod_source: op.mod_source !== undefined ? op.mod_source : -1,
               feedback: op.feedback || 0,
               is_carrier: op.is_carrier !== undefined ? op.is_carrier : true,
+              waveform: typeof op.waveform === 'string' ? WAVE_NAMES.indexOf(op.waveform.charAt(0).toUpperCase() + op.waveform.slice(1)) : (op.waveform || 0),
+              loop_mode: op.loop_mode !== undefined ? op.loop_mode : 1,
+              loop_start: op.loop_start || 0,
+              loop_end: op.loop_end || WAVE_LEN,
             }))
           })).filter(p => p.operators.length > 0);
         } else if (data.operators) {
@@ -1352,6 +1657,10 @@ function loadFile() {
             mod_source: op.mod_source !== undefined ? op.mod_source : -1,
             feedback: op.feedback || 0,
             is_carrier: op.is_carrier !== undefined ? op.is_carrier : true,
+            waveform: typeof op.waveform === 'string' ? WAVE_NAMES.indexOf(op.waveform.charAt(0).toUpperCase() + op.waveform.slice(1)) : (op.waveform || 0),
+            loop_mode: op.loop_mode !== undefined ? op.loop_mode : 1,
+            loop_start: op.loop_start || 0,
+            loop_end: op.loop_end || WAVE_LEN,
           }))}];
         }
         if (patches.length === 0) {
