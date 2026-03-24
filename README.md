@@ -39,7 +39,6 @@ Both kits use the same program numbers (0-15) so MIDI files work with either.
 | `tools/saturn_kit.py` | Saturn Sound Kit generator (TON + SF2 with PCM or FM instruments) |
 | `tools/tonview.py` | TON file viewer — generates interactive HTML with waveform display and playback |
 | `tools/fm_sim.py` | FM synthesis simulator — renders FM patches to WAV for auditioning |
-| `tools/exc2exb.py` | DSP assembler .exc → SGL driver .exb converter |
 | `tools/gen_kit_demo.py` | Generates a demo MIDI using all kit instruments |
 
 ## Pre-built Kit

@@ -178,18 +178,22 @@ def render_note(patch: FMPatch, note: int = 69, duration: float = 1.0,
         for oi, op in enumerate(patch.operators):
             env_level = envelopes[oi].tick()
 
-            # Phase modulation from source operator
+            # Phase modulation from source operator.
+            # Like the DX7: the modulator's output (already scaled by its
+            # level and envelope) directly offsets the carrier's phase.
+            # mod_offset = mod_output * π (in table samples).
+            # This gives β ≈ level * π at peak, which matches DX7 behavior:
+            #   level 0.5 → β ≈ 1.6 (gentle e-piano)
+            #   level 0.8 → β ≈ 2.5 (strong FM)
+            #   level 1.0 → β ≈ 3.1 (maximum)
             mod_offset = 0.0
-            if op.mod_source >= 0 and op.mod_source < n_ops and op.mdl >= 5:
-                # SCSP MDL scaling: exponential, each step ~doubles depth
-                # mdl_scale maps MDL 5-15 to useful modulation indices
-                mdl_scale = 2.0 ** (op.mdl - 10)  # MDL 10 ≈ 1.0 modulation index
+            if op.mod_source >= 0 and op.mod_source < n_ops:
                 mod_value = op_outputs[op.mod_source] if op.mod_source < oi else prev_outputs[op.mod_source]
-                mod_offset = mod_value * mdl_scale * TABLE_SIZE
+                mod_offset = mod_value * TABLE_SIZE / 2
 
             # Self-feedback
             if op.feedback > 0:
-                mod_offset += prev_outputs[oi] * op.feedback * TABLE_SIZE * 0.5
+                mod_offset += prev_outputs[oi] * op.feedback * TABLE_SIZE * 0.3
 
             # Read from sine table with phase modulation
             read_pos = phases[oi] + mod_offset
@@ -217,6 +221,30 @@ def render_note(patch: FMPatch, note: int = 69, duration: float = 1.0,
     peak = max(abs(s) for s in output) or 1.0
     if peak > 1.0:
         output = [s / peak * 0.9 for s in output]
+
+    return output
+
+
+def render_demo(patch: FMPatch, base_note: int = 60,
+                sample_rate: int = SAMPLE_RATE) -> list:
+    """Render a short musical demo: staccato notes then a sustained note.
+    Shows both the attack character and the sustain/release behavior."""
+    output = []
+    gap = [0.0] * int(0.1 * sample_rate)  # 100ms silence between notes
+
+    # 4 staccato notes (short, punchy) — ascending
+    for i, interval in enumerate([0, 4, 7, 12]):
+        note = base_note + interval
+        samples = render_note(patch, note, duration=0.15, release=0.3)
+        output.extend(samples)
+        output.extend(gap)
+
+    # Brief pause
+    output.extend([0.0] * int(0.3 * sample_rate))
+
+    # 1 sustained note (shows the held timbre + release tail)
+    samples = render_note(patch, base_note, duration=2.0, release=1.0)
+    output.extend(samples)
 
     return output
 
@@ -384,6 +412,8 @@ def main():
     parser.add_argument('--release', type=float, default=0.5, help='Release time after note-off')
     parser.add_argument('--wav', help='Output WAV file')
     parser.add_argument('--all', action='store_true', help='Render all presets')
+    parser.add_argument('--demo', action='store_true',
+                        help='Render a musical demo (staccato + sustained) instead of a single note')
     parser.add_argument('--save-config', help='Save patch as JSON config')
     args = parser.parse_args()
 
@@ -407,7 +437,10 @@ def main():
         outdir = 'fm_renders'
         os.makedirs(outdir, exist_ok=True)
         for name, patch in PRESETS.items():
-            samples = render_note(patch, args.note, args.duration, args.release)
+            if args.demo:
+                samples = render_demo(patch, args.note)
+            else:
+                samples = render_note(patch, args.note, args.duration, args.release)
             wav_path = os.path.join(outdir, f'{name}.wav')
             write_wav(samples, wav_path)
             print(f"  {wav_path:30s}  {patch.name}")
@@ -446,7 +479,10 @@ def main():
               f"level={op.level:.1f} AR={op.ar} D1R={op.d1r} DL={op.dl} "
               f"RR={op.rr} {extras}")
 
-    samples = render_note(patch, args.note, args.duration, args.release)
+    if args.demo:
+        samples = render_demo(patch, args.note)
+    else:
+        samples = render_note(patch, args.note, args.duration, args.release)
     write_wav(samples, wav_path)
     print(f"  Output: {wav_path} ({len(samples)} samples, "
           f"{len(samples)/SAMPLE_RATE:.2f}s)")
