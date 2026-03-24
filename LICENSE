@@ -26,3 +26,22 @@ SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
 CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+Third-Party Components
+======================
+
+The SCSP emulator in tools/scsp_wasm/ (scsp.c, scsp.h, scspdsp.c, scsplfo.c)
+is derived from the Audio Overload SDK (aosdk) and is licensed under the
+MAME license (pre-2016), which adds the following restrictions:
+
+  * Redistributions may not be sold, nor may they be used in a commercial
+    product or activity.
+  * Modified redistributions must include complete source code.
+
+See tools/scsp_wasm/LICENSE for the full MAME license text.
+
+The MAME license applies to the SCSP emulator source files, the compiled WASM
+binary (scsp.wasm), the JS glue (scsp.js), and the HTML output of fm_editor.py
+(which embeds the WASM binary). All other files in this repository are under
+the BSD 3-Clause license above.
