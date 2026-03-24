@@ -18,6 +18,19 @@ cc -O2 -o mid2seq tools/mid2seq.c    # compile (once)
 # 4. Ship kit/saturn_kit.ton + my_song.seq with your game
 ```
 
+### Building the FM Patch Editor (optional)
+
+The FM Patch Editor requires a one-time build of the SCSP WASM engine:
+
+```bash
+# Requires Emscripten (brew install emscripten / emsdk)
+cd tools/scsp_wasm && make    # builds scsp.wasm + scsp.js
+cd ../..
+python3 tools/fm_editor.py    # opens editor in browser
+```
+
+Pre-built WASM binaries are included in the repository — you only need to rebuild if you modify the SCSP emulator source.
+
 See **[MUSICIAN_GUIDE.md](MUSICIAN_GUIDE.md)** for the full composing and export workflow.
 
 ## Two Kit Modes
@@ -38,7 +51,9 @@ Both kits use the same program numbers (0-15) so MIDI files work with either.
 | `tools/sf2ton.py` | SoundFont (.sf2) → TON converter |
 | `tools/saturn_kit.py` | Saturn Sound Kit generator (TON + SF2 with PCM or FM instruments) |
 | `tools/tonview.py` | TON file viewer — generates interactive HTML with waveform display and playback |
+| `tools/fm_editor.py` | **FM Patch Editor** — browser-based editor with real-time SCSP emulation via WebAssembly |
 | `tools/fm_sim.py` | FM synthesis simulator — renders FM patches to WAV for auditioning |
+| `tools/dx7_to_saturn.py` | DX7 SysEx → Saturn FM patch converter (experimental — most patches need manual tweaking) |
 | `tools/gen_kit_demo.py` | Generates a demo MIDI using all kit instruments |
 
 ## Pre-built Kit
@@ -61,7 +76,16 @@ The Saturn's SCSP (YMF292) supports DX7-style **phase modulation** between any o
 - **Self-feedback** supported for richer harmonics (organ, brass)
 - **2-32 operators** with fully free wiring — more flexible than the DX7's fixed algorithms
 
-Preview FM patches before committing to hardware:
+Design and preview FM patches interactively:
+
+```bash
+python3 tools/fm_editor.py                        # Open the FM Patch Editor in browser
+python3 tools/fm_editor.py --load patches.json    # Open with existing patches
+```
+
+The FM Patch Editor runs a **hardware-accurate SCSP emulator** (from [aosdk](https://github.com/nmlgc/aosdk)) compiled to WebAssembly directly in the browser. What you hear in the editor is what you'll hear on real Saturn hardware — envelope timing, FM modulation depth, and ring buffer behavior are all authentic. Design patches with the visual editor, then export as JSON for `saturn_kit.py`.
+
+Or render FM patches to WAV from the command line:
 
 ```bash
 python3 tools/fm_sim.py --list                    # List preset patches
@@ -74,6 +98,7 @@ python3 tools/fm_sim.py --patch bell --note 72    # Render bell at C5
 
 - **[MUSICIAN_GUIDE.md](MUSICIAN_GUIDE.md)** — How to compose, export, and integrate music into your game
 - **[SEQUENCES.md](SEQUENCES.md)** — Technical reference for SEQ, TON, and MAP file formats
+- **[tools/scsp_wasm/PORTING_NOTES.md](tools/scsp_wasm/PORTING_NOTES.md)** — Technical notes on porting the SCSP emulator to WebAssembly
 
 ## Examples
 
@@ -83,23 +108,23 @@ python3 tools/fm_sim.py --patch bell --note 72    # Render bell at C5
 ## How It Works
 
 ```
-Your DAW                    Saturn Hardware
-────────                    ──────────────
-saturn_kit.sf2              saturn_kit.ton ──→ SCSP Sound RAM
-     │                           │
-  Compose MIDI              SGL Sound Driver
-     │                           │
-  my_song.mid ──→ mid2seq ──→ my_song.seq ──→ SEQ Playback
-                                 │
-                            FM: modulator slots modulate
-                                carrier slots via phase offset
-                            PCM: single-cycle waveforms loop
+FM Patch Editor              Your DAW                    Saturn Hardware
+───────────────              ────────                    ──────────────
+fm_editor.py                 saturn_kit.sf2              saturn_kit.ton ──→ SCSP Sound RAM
+  │ SCSP WASM emulator            │                           │
+  │ (aosdk compiled to            │                      SGL Sound Driver
+  │  WebAssembly — plays      Compose MIDI                    │
+  │  in browser, hardware-        │                           │
+  │  accurate audio)         my_song.mid ──→ mid2seq ──→ my_song.seq ──→ SEQ Playback
+  │                                                           │
+  ↓                                                      FM: modulator slots modulate
+patches.json ──→ saturn_kit.py ──→ saturn_kit.ton            carrier slots via phase offset
+                                                         PCM: single-cycle waveforms loop
 ```
 
-The SF2 is a preview — it approximates how the Saturn will sound.
-The TON + SEQ files are what actually run on the hardware.
+The **FM Patch Editor** runs the real SCSP emulator in your browser — what you hear IS what plays on Saturn. Design patches interactively, export to JSON, and feed into `saturn_kit.py` to generate the final TON file.
 
-FM voices sound richer on the Saturn than the SF2 preview (the SF2 can't simulate phase modulation — it just plays the raw sine sample).
+The **SF2** is a simpler preview for DAW composing — it can't simulate FM, but notes and timing match. FM voices sound richer on the actual Saturn.
 
 ## Credits
 
@@ -108,6 +133,7 @@ FM voices sound richer on the Saturn than the SF2 preview (the SF2 can't simulat
 - TON format reverse-engineered from [VGMToolbox](https://github.com/Hengle/VGMToolbox-1) (kingshriek) and [VGMTrans](https://github.com/vgmtrans/vgmtrans)
 - ADSR timing tables from MAME's SCSP implementation
 - FM synthesis behavior verified against [mednafen](https://mednafen.github.io/) SCSP emulation source
+- SCSP emulator in FM Patch Editor from [aosdk](https://github.com/nmlgc/aosdk) by ElSemi / R. Belmont / kingshriek, compiled to WebAssembly via [Emscripten](https://emscripten.org/)
 
 ## License
 

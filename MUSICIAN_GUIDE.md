@@ -219,9 +219,54 @@ Uses single-cycle waveforms (sine, sawtooth, square, etc.) for all instruments. 
 
 Both kits use the same program numbers, so the same MIDI works with either TON file.
 
-### Previewing FM Patches
+### FM Patch Editor (Interactive, Hardware-Accurate)
 
-The FM simulator renders patches to WAV using the same math as the Saturn:
+The FM Patch Editor lets you design, audition, and export FM patches in your browser with **real-time SCSP emulation** — the same chip emulator used by Saturn game music players, compiled to WebAssembly:
+
+```bash
+python3 tools/fm_editor.py                        # Launch the editor
+python3 tools/fm_editor.py --load my_patches.json # Load existing patches
+```
+
+The editor provides:
+- **Visual operator graph** — drag operators, wire modulation routing, toggle carrier/modulator
+- **Full SCSP parameter control** — AR, D1R, DL, D2R, RR, TL, MDL, feedback, and more
+- **Envelope visualization** — real-time display with SCSP rate tables
+- **Piano keyboard** — click or use computer keyboard (A-K keys) to play notes live
+- **Preset library** — Electric Piano, Brass, Organ, Bell, Strings, Bass, and more
+- **Algorithm presets** — common FM topologies (2-op, 3-op serial, Y-shape, parallel, 4-op)
+- **Export to JSON** — compatible with `saturn_kit.py --config`
+- **Export to WAV** — offline render of any patch
+
+**What makes it special:** The audio engine is the actual [aosdk](https://github.com/nmlgc/aosdk) SCSP emulator (by ElSemi, R. Belmont, kingshriek) compiled to WebAssembly. Envelopes, FM modulation depth, ring buffer behavior, and key rate scaling are all hardware-accurate. What you hear in the editor is what you'll hear on real Saturn hardware.
+
+The editor generates a single self-contained HTML file (~120KB) with the WASM binary embedded — no server or installation required, just open in any modern browser.
+
+#### Designing a custom FM instrument
+
+1. Open the editor: `python3 tools/fm_editor.py`
+2. Click **Algorithms** and choose a topology (e.g., "1→2" for a simple 2-op FM)
+3. Click the modulator box, adjust its **frequency ratio** (2.0 for classic e-piano brightness) and **level**
+4. Click the carrier box, adjust **MDL** (modulation depth — higher = brighter)
+5. Tweak the **envelope** (AR/D1R/DL/D2R/RR) to shape the attack and decay
+6. Play notes on the piano keyboard to audition
+7. Click **Export JSON** to save your patches
+8. Use them with saturn_kit: `python3 tools/saturn_kit.py --config my_patches.json -o my_kit`
+
+#### DX7 Patch Import (Experimental)
+
+Convert DX7 SysEx banks to Saturn-compatible FM patches:
+
+```bash
+python3 tools/dx7_to_saturn.py my_dx7_bank.syx --export patches.json
+python3 tools/fm_editor.py --load patches.json   # Audition in the editor
+```
+
+**Most DX7 patches will not sound correct on Saturn.** The DX7 has 6 operators with 32 fixed algorithms, while the Saturn's SCSP has fundamentally different FM behavior: phase modulation via a shared ring buffer (not direct operator wiring), 16-bit ring buffer resolution (causes quantization noise in feedback), and no native multi-operator algorithm support. The converter reduces 6 operators to 2-4, simplifies envelopes from DX7's 4-stage to SCSP's format, and approximates feedback — but complex DX7 patches (especially those relying on 4+ operators, specific algorithms, or subtle level balancing) will sound different. Use imported patches as a starting point and tweak them in the editor.
+
+### FM Simulator (Command-Line)
+
+For quick offline rendering without the visual editor:
 
 ```bash
 python3 tools/fm_sim.py --list                    # List available patches
@@ -230,7 +275,7 @@ python3 tools/fm_sim.py --patch bell --note 72    # Render bell at C5
 python3 tools/fm_sim.py --all                     # Render all presets to fm_renders/
 ```
 
-This gives a better preview of FM instruments than the SF2 can.
+Note: `fm_sim.py` uses a simplified JS-style FM model. The FM Patch Editor's WASM engine is more accurate to the actual hardware.
 
 ## Customizing the Instrument Kit
 
