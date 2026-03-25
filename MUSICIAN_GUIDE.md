@@ -278,7 +278,7 @@ This gives you an approximation. The actual Saturn will sound different due to h
 
 ### Hardware Preview (mednafen)
 
-If you have the full dev environment set up (see the scsp-fx repo):
+If you have the full dev environment set up (see the [scsp-fx](https://codeberg.org/magnavespa/scsp-fx) repo):
 
 ```bash
 # Copy files to the SRL sample project's cd/data/ folder:
