@@ -177,11 +177,21 @@ class SCSPSynthUI extends DISTRHO.UI {
 
     /* ── JSON export/import ── */
     buildJsonButtons() {
-        document.getElementById('btn-copy-json').addEventListener('click', () => this.copyJson());
-        document.getElementById('btn-paste-json').addEventListener('click', () => this.pasteJson());
+        const bind = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener('click', fn); };
+        bind('btn-copy-json', () => this.copyJson());
+        bind('btn-paste-json', () => this.pasteJson());
+        bind('btn-export-ton', () => this.exportTon());
+        bind('btn-load-ton', () => this.loadTon());
+        bind('btn-set-kit', () => this.setKitPath());
+        bind('btn-save-kit', () => this.saveToKit());
+        bind('btn-load-kit', () => this.loadFromKit());
         const progSel = document.getElementById('program-num-select');
         progSel.addEventListener('change', () => {
-            this.setParameterValue(IDX_PROGRAM_NUM, parseInt(progSel.value));
+            const prog = parseInt(progSel.value);
+            this.setParameterValue(IDX_PROGRAM_NUM, prog);
+            if (this.tonPatches && prog < this.tonPatches.length) {
+                this._applyPatch(this.tonPatches[prog]);
+            }
         });
     }
 
@@ -294,6 +304,317 @@ class SCSPSynthUI extends DISTRHO.UI {
         const el = document.getElementById('json-status');
         el.textContent = msg;
         setTimeout(() => { el.textContent = ''; }, 3000);
+    }
+
+    /* Export current patch as TON file → download */
+    exportTon() {
+        if (typeof TonIO === 'undefined' || !TonIO) {
+            this.showStatus('TON I/O not available');
+            return;
+        }
+        const instrument = this.buildInstrumentJson();
+        // Convert to editor patch format for TonIO
+        const patch = {
+            name: instrument.name,
+            operators: instrument.fm_ops.map(op => ({
+                freq_ratio: op.freq_ratio,
+                level: op.level,
+                ar: op.ar, d1r: op.d1r, dl: op.dl, d2r: op.d2r, rr: op.rr,
+                mdl: op.mdl,
+                mod_source: op.mod_source,
+                feedback: op.feedback,
+                is_carrier: op.is_carrier,
+                waveform: op.waveform, // string name
+                loop_mode: op.loop_mode,
+                loop_start: op.loop_start,
+                loop_end: op.loop_end,
+            })),
+        };
+        const tonData = TonIO.exportTon([patch], generateWaveform);
+        const blob = new Blob([tonData], { type: 'application/octet-stream' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = (instrument.name || 'patch') + '.ton'; a.click();
+        URL.revokeObjectURL(url);
+        this.showStatus('Exported TON');
+    }
+
+    /* Apply a TonIO patch to the DSP via setState('load_patch', ...).
+     * Sends all params + PCM in a single message to the C++ side,
+     * which sets fParams directly and calls rebuildOps() once.
+     * This bypasses the setParameterValue host round-trip entirely.
+     *
+     * Format: "numOps|ratio,level,ar,d1r,dl,d2r,rr,fb,mdl,ms,carrier,lm,ls,le,pcmLen,pcmB64|..." */
+    _applyPatch(patch) {
+        if (!patch || !patch.operators) return;
+        const ops = patch.operators;
+        const n = Math.min(ops.length, MAX_OPS);
+
+        this.customWaves = {};
+        let msg = '' + n;
+
+        for (let i = 0; i < n; i++) {
+            const o = ops[i];
+            const ratio = o.freq_ratio || 1;
+            const level = o.level !== undefined ? o.level : 0.8;
+            const ar = o.ar !== undefined ? o.ar : 31;
+            const d1r = o.d1r || 0;
+            const dl = o.dl || 0;
+            const d2r = o.d2r || 0;
+            const rr = o.rr !== undefined ? o.rr : 14;
+            const fb = o.feedback || 0;
+            const mdl = o.mdl || 0;
+            const ms = (o.mod_source !== undefined ? o.mod_source : -1) + 1;
+            const carrier = o.is_carrier ? 1 : 0;
+            const lm = o.loop_mode !== undefined ? o.loop_mode : 1;
+            const ls = o.loop_start || 0;
+            let le = o.loop_end || 1024;
+
+            let pcmLen = 0;
+            let pcmB64 = '';
+            if (o.pcm && o.pcm.length > 0) {
+                this.customWaves[i] = o.pcm;
+                const int16 = new Int16Array(o.pcm.length);
+                for (let s = 0; s < o.pcm.length; s++) {
+                    int16[s] = Math.max(-32768, Math.min(32767, Math.round(o.pcm[s] * 32767)));
+                }
+                const bytes = new Uint8Array(int16.buffer);
+                let raw = '';
+                for (let s = 0; s < bytes.length; s++) raw += String.fromCharCode(bytes[s]);
+                pcmB64 = btoa(raw);
+                pcmLen = o.pcm.length;
+                le = o.pcm.length;
+            }
+
+            msg += '|' + ratio + ',' + level + ',' + ar + ',' + d1r + ',' + dl + ','
+                 + d2r + ',' + rr + ',' + fb + ',' + mdl + ',' + ms + ',' + carrier + ','
+                 + lm + ',' + ls + ',' + le + ',' + pcmLen + ',' + pcmB64;
+        }
+
+        /* Send everything to C++ in one shot */
+        this.setState('load_patch', msg);
+
+        /* Update UI directly since parameterChanged won't fire from setState.
+         * Pre-seed slider values so buildTabContent reads correct values. */
+        for (let i = 0; i < MAX_OPS; i++) {
+            const b = i * PARAMS_PER_OP;
+            if (i < n) {
+                const o = ops[i];
+                this._setSlider(b + 0,  o.freq_ratio || 1);
+                this._setSlider(b + 1,  o.level !== undefined ? o.level : 0.8);
+                this._setSlider(b + 2,  o.ar !== undefined ? o.ar : 31);
+                this._setSlider(b + 3,  o.d1r || 0);
+                this._setSlider(b + 4,  o.dl || 0);
+                this._setSlider(b + 5,  o.d2r || 0);
+                this._setSlider(b + 6,  o.rr !== undefined ? o.rr : 14);
+                this._setSlider(b + 7,  o.feedback || 0);
+                this._setSlider(b + 8,  o.mdl || 0);
+                this._setSlider(b + 9,  (o.mod_source !== undefined ? o.mod_source : -1) + 1);
+                this._setSlider(b + 10, 0);
+                this._setSlider(b + 11, o.loop_mode !== undefined ? o.loop_mode : 1);
+                this._setSlider(b + 12, o.loop_start || 0);
+                this._setSlider(b + 13, o.pcm ? o.pcm.length : (o.loop_end || 1024));
+                this._setSlider(IDX_CARRIER_BASE + i, o.is_carrier ? 1 : 0);
+            } else {
+                this._setSlider(b + 0, 1); this._setSlider(b + 1, 0.8);
+                this._setSlider(b + 2, 31); this._setSlider(b + 3, 0);
+                this._setSlider(b + 4, 0); this._setSlider(b + 5, 0);
+                this._setSlider(b + 6, 14); this._setSlider(b + 7, 0);
+                this._setSlider(b + 8, 0); this._setSlider(b + 9, 0);
+                this._setSlider(b + 10, 0); this._setSlider(b + 11, 1);
+                this._setSlider(b + 12, 0); this._setSlider(b + 13, 1024);
+                this._setSlider(IDX_CARRIER_BASE + i, 0);
+            }
+        }
+
+        this.numOps = n;
+        document.getElementById('num-ops-select').value = n;
+        this.buildTabs();
+        this.activeTab = 0;
+        this.buildTabContent(0);
+        this.drawEnvelope();
+    }
+
+    /* Set a slider value locally without calling setParameterValue */
+    _setSlider(index, value) {
+        const s = this.sliders[index];
+        if (s) {
+            if (s.input.tagName === 'SELECT') {
+                s.input.value = Math.round(value);
+            } else {
+                s.input.value = value;
+                if (s.val) {
+                    const opParam = index % PARAMS_PER_OP;
+                    if (opParam < OP_PARAMS.length) s.val.textContent = OP_PARAMS[opParam].fmt(value);
+                }
+            }
+        } else {
+            /* Slider doesn't exist yet — create a dummy so getParamValue/buildTabContent can read it */
+            this.sliders[index] = { input: { value: value, tagName: 'INPUT' }, val: null };
+        }
+    }
+
+    /* Load TON file → import all voices, show current program */
+    loadTon() {
+        this.showStatus('Load TON: picking file...');
+        if (typeof TonIO === 'undefined' || !TonIO) {
+            this.showStatus('TON I/O not available');
+            return;
+        }
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.ton,.TON';
+        input.style.display = 'none';
+        document.body.appendChild(input); /* Must be in DOM for WKWebView change events */
+        input.onchange = (e) => {
+            const file = e.target.files[0];
+            document.body.removeChild(input); /* Clean up */
+            if (!file) { this.showStatus('No file selected'); return; }
+            this.showStatus('Reading ' + file.name + '...');
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+                this.showStatus('Parsing ' + ev.target.result.byteLength + ' bytes...');
+                try {
+                    const result = TonIO.importTon(ev.target.result);
+                    if (!result.patches || result.patches.length === 0) {
+                        this.showStatus('No voices in TON');
+                        return;
+                    }
+                    this.tonPatches = result.patches;
+                    const progNum = parseInt(document.getElementById('program-num-select').value);
+                    const idx = Math.min(progNum, this.tonPatches.length - 1);
+                    document.getElementById('program-num-select').value = idx;
+                    this.setParameterValue(IDX_PROGRAM_NUM, idx);
+                    this._applyPatch(this.tonPatches[idx]);
+                    this.showStatus('Loaded ' + this.tonPatches.length + ' voices, prog ' + idx + ' (' + this.tonPatches[idx].operators.length + ' ops)');
+                } catch (err) {
+                    this.showStatus('TON error: ' + err.message);
+                }
+            };
+            reader.onerror = () => { this.showStatus('File read error'); };
+            reader.readAsArrayBuffer(file);
+        };
+        input.click();
+    }
+
+    /* ── Shared Kit workflow ── */
+
+    setKitPath() {
+        const current = this.kitPath || '';
+        const path = prompt('Enter full path to shared .ton kit file:', current);
+        if (path === null) return; // cancelled
+        this.kitPath = path;
+        this.setState('kit_path', path);
+        document.getElementById('kit-path-label').textContent = path.split('/').pop() || path.split('\\').pop() || path;
+        this.showStatus('Kit path set');
+    }
+
+    /* Build a TonIO-compatible patch from current params */
+    _buildTonPatch() {
+        const instrument = this.buildInstrumentJson();
+        return {
+            name: instrument.name,
+            operators: instrument.fm_ops.map(op => ({
+                freq_ratio: op.freq_ratio,
+                level: op.level,
+                ar: op.ar, d1r: op.d1r, dl: op.dl, d2r: op.d2r, rr: op.rr,
+                mdl: op.mdl,
+                mod_source: op.mod_source,
+                feedback: op.feedback,
+                is_carrier: op.is_carrier,
+                waveform: op.waveform,
+                loop_mode: op.loop_mode,
+                loop_start: op.loop_start,
+                loop_end: op.loop_end,
+            })),
+        };
+    }
+
+    async saveToKit() {
+        if (typeof TonIO === 'undefined' || !TonIO) {
+            this.showStatus('TON I/O not available');
+            return;
+        }
+        if (!this.kitPath) {
+            this.setKitPath();
+            if (!this.kitPath) return;
+        }
+
+        const progNum = parseInt(document.getElementById('program-num-select').value);
+        const patch = this._buildTonPatch();
+
+        // Read existing kit file (may not exist yet)
+        let existingBuffer = null;
+        try {
+            const b64 = await this.call('readBinaryFile', this.kitPath);
+            if (b64 && b64.length > 0) {
+                existingBuffer = _b64ToArrayBuffer(b64);
+            }
+        } catch (e) {
+            // File doesn't exist yet — start fresh
+        }
+
+        let tonData;
+        if (existingBuffer) {
+            tonData = TonIO.mergeTon(existingBuffer, progNum, patch, generateWaveform);
+        } else {
+            // Create new kit with empty slots up to progNum
+            const patches = [];
+            for (let i = 0; i < progNum; i++) {
+                patches.push({ name: 'Empty', operators: [{ freq_ratio: 1, level: 0, ar: 31, d1r: 0, dl: 0, d2r: 0, rr: 14, mdl: 0, mod_source: -1, feedback: 0, is_carrier: true, waveform: 0, loop_mode: 1, loop_start: 0, loop_end: 1024 }] });
+            }
+            patches.push(patch);
+            tonData = TonIO.exportTon(patches, generateWaveform);
+        }
+
+        // Write back
+        const b64out = _arrayBufferToB64(tonData);
+        try {
+            const ok = await this.call('writeBinaryFile', this.kitPath, b64out);
+            this.showStatus(ok ? 'Saved prog ' + progNum + ' to kit' : 'Write failed');
+        } catch (e) {
+            this.showStatus('Write error: ' + e);
+        }
+    }
+
+    async loadFromKit() {
+        if (typeof TonIO === 'undefined' || !TonIO) {
+            this.showStatus('TON I/O not available');
+            return;
+        }
+        if (!this.kitPath) {
+            this.setKitPath();
+            if (!this.kitPath) return;
+        }
+
+        const progNum = parseInt(document.getElementById('program-num-select').value);
+
+        let b64;
+        try {
+            b64 = await this.call('readBinaryFile', this.kitPath);
+        } catch (e) {
+            this.showStatus('Read error: ' + e);
+            return;
+        }
+        if (!b64 || b64.length === 0) {
+            this.showStatus('Kit file not found');
+            return;
+        }
+
+        const buffer = _b64ToArrayBuffer(b64);
+        const result = TonIO.importTon(buffer);
+        if (!result.patches || result.patches.length === 0) {
+            this.showStatus('No voices in kit');
+            return;
+        }
+        this.tonPatches = result.patches;
+        const idx = Math.min(progNum, this.tonPatches.length - 1);
+        if (idx !== progNum) {
+            document.getElementById('program-num-select').value = idx;
+            this.setParameterValue(IDX_PROGRAM_NUM, idx);
+        }
+        this._applyPatch(this.tonPatches[idx]);
+        this.showStatus('Loaded kit: ' + this.tonPatches.length + ' voices, showing prog ' + idx);
     }
 
     /* ── Num operators selector ── */
@@ -826,6 +1147,11 @@ class SCSPSynthUI extends DISTRHO.UI {
     }
 
     /* ── DPF callbacks ── */
+
+    /* Stub methods for C++ bridge responses — needed so dpf.js can resolve call() promises */
+    readBinaryFile() {}
+    writeBinaryFile() {}
+
     parameterChanged(index, value) {
         /* Update program number */
         if (index === IDX_PROGRAM_NUM) {
@@ -871,6 +1197,120 @@ class SCSPSynthUI extends DISTRHO.UI {
     programLoaded(index) {
         document.getElementById('preset-select').value = index;
     }
+
+    /* ── Self-test: diagnose host communication ── */
+    selfTest() {
+        const log = [];
+        log.push('=== SCSP FM Synth Self-Test ===');
+        log.push('DISTRHO.env: ' + JSON.stringify(DISTRHO.env));
+        log.push('TonIO available: ' + (typeof TonIO !== 'undefined' && TonIO !== null));
+        log.push('window.host: ' + (typeof window.host));
+        log.push('window.host.postMessage: ' + (typeof (window.host && window.host.postMessage)));
+
+        // Test 1: Does setParameterValue work?
+        log.push('\n--- Test 1: setParameterValue round-trip ---');
+        const testIdx = 0 * PARAMS_PER_OP + 2; // Op0 AR
+        const origVal = this.sliders[testIdx] ? parseFloat(this.sliders[testIdx].input.value) : -1;
+        log.push('Op0 AR slider before: ' + origVal);
+        const testVal = origVal === 25 ? 20 : 25;
+        log.push('Setting Op0 AR to ' + testVal + ' via setParameterValue...');
+        this.setParameterValue(testIdx, testVal);
+
+        // Check after a delay (host round-trip is async)
+        setTimeout(() => {
+            const afterVal = this.sliders[testIdx] ? parseFloat(this.sliders[testIdx].input.value) : -1;
+            log.push('Op0 AR slider after (100ms): ' + afterVal);
+            log.push('setParameterValue works: ' + (afterVal === testVal));
+
+            // Restore
+            this.setParameterValue(testIdx, origVal);
+
+            // Test 2: Does applyPreset work?
+            log.push('\n--- Test 2: applyPreset ---');
+            this.applyPreset(0); // Electric Piano
+            setTimeout(() => {
+                const epAR = this.sliders[testIdx] ? parseFloat(this.sliders[testIdx].input.value) : -1;
+                log.push('After applyPreset(0): Op0 AR = ' + epAR + ' (expect 31)');
+                log.push('applyPreset works: ' + (epAR === 31));
+
+                const numOpsSlider = document.getElementById('num-ops-select');
+                log.push('numOps selector: ' + (numOpsSlider ? numOpsSlider.value : 'NOT FOUND'));
+
+                // Test 3: Does _applyPatch work with a simple patch?
+                log.push('\n--- Test 3: _applyPatch ---');
+                const testPatch = {
+                    name: 'Test', operators: [
+                        { freq_ratio: 3.0, level: 0.7, ar: 25, d1r: 10, dl: 6, d2r: 2, rr: 10,
+                          feedback: 0, mdl: 0, mod_source: -1, is_carrier: true,
+                          loop_mode: 1, loop_start: 0, loop_end: 1024 }
+                    ]
+                };
+                log.push('Calling _applyPatch with 1-op patch (AR=25)...');
+                this._applyPatch(testPatch);
+
+                setTimeout(() => {
+                    const patchAR = this.sliders[testIdx] ? parseFloat(this.sliders[testIdx].input.value) : -1;
+                    log.push('After _applyPatch: Op0 AR = ' + patchAR + ' (expect 25)');
+                    log.push('_applyPatch works: ' + (patchAR === 25));
+
+                    const numOpsAfter = document.getElementById('num-ops-select');
+                    log.push('numOps after _applyPatch: ' + (numOpsAfter ? numOpsAfter.value : 'NOT FOUND') + ' (expect 1)');
+
+                    // Test 4: Does _applyPatch with PCM work?
+                    log.push('\n--- Test 4: _applyPatch with PCM ---');
+                    const pcm = new Float32Array(100);
+                    for (let i = 0; i < 100; i++) pcm[i] = Math.sin(2 * Math.PI * i / 100);
+                    const pcmPatch = {
+                        name: 'PCM Test', operators: [
+                            { freq_ratio: 1.0, level: 0.9, ar: 28, d1r: 5, dl: 3, d2r: 0, rr: 12,
+                              feedback: 0, mdl: 0, mod_source: -1, is_carrier: true,
+                              loop_mode: 1, loop_start: 0, loop_end: 100, pcm: pcm }
+                        ]
+                    };
+                    log.push('Calling _applyPatch with PCM patch (AR=28, 100 samples)...');
+                    this._applyPatch(pcmPatch);
+
+                    setTimeout(() => {
+                        const pcmAR = this.sliders[testIdx] ? parseFloat(this.sliders[testIdx].input.value) : -1;
+                        log.push('After PCM _applyPatch: Op0 AR = ' + pcmAR + ' (expect 28)');
+                        log.push('PCM _applyPatch works: ' + (pcmAR === 28));
+                        log.push('customWaves[0] length: ' + (this.customWaves && this.customWaves[0] ? this.customWaves[0].length : 'none'));
+
+                        // Restore to Electric Piano
+                        this.applyPreset(0);
+
+                        log.push('\n=== Summary ===');
+                        const report = log.join('\n');
+                        console.log(report);
+                        alert(report);
+                    }, 200);
+                }, 200);
+            }, 200);
+        }, 200);
+    }
+
+    stateChanged(key, value) {
+        if (key === 'kit_path' && value) {
+            this.kitPath = value;
+            const label = document.getElementById('kit-path-label');
+            if (label) label.textContent = value.split('/').pop() || value.split('\\').pop() || value;
+        }
+    }
+}
+
+/* ── Base64 helpers for kit file I/O ── */
+function _b64ToArrayBuffer(b64) {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes.buffer;
+}
+
+function _arrayBufferToB64(data) {
+    const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin);
 }
 
 const ui = new SCSPSynthUI();

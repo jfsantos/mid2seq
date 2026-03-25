@@ -66,7 +66,15 @@ h1 select { background: #222; color: #ccc; border: 1px solid #444; padding: 3px 
   </select>
   <button id="btn-copy-json" class="toolbar-btn">Copy JSON</button>
   <button id="btn-paste-json" class="toolbar-btn">Paste JSON</button>
+  <button id="btn-export-ton" class="toolbar-btn">Export TON</button>
+  <button id="btn-load-ton" class="toolbar-btn">Load TON</button>
+  <span style="color:#444;">|</span>
+  <button id="btn-set-kit" class="toolbar-btn">Set Kit Path</button>
+  <button id="btn-save-kit" class="toolbar-btn">Save to Kit</button>
+  <button id="btn-load-kit" class="toolbar-btn">Load from Kit</button>
+  <span id="kit-path-label" style="font-size:9px;color:#666;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;vertical-align:middle;"></span>
   <span id="json-status" style="font-size:10px;color:#4a4;"></span>
+  <span style="font-size:8px;color:#333;">v20260325d</span>
 </div>
 
 <div class="tabs" id="op-tabs"></div>
@@ -77,6 +85,19 @@ h1 select { background: #222; color: #ccc; border: 1px solid #444; padding: 3px 
   <canvas id="env-canvas"></canvas>
 </div>
 
-<script src="ui.js"></script>
+<script>
+// Global error handler — catches any uncaught JS errors
+window.onerror = function(msg, url, line, col, error) {
+    const errText = 'JS ERROR: ' + msg + ' at ' + url + ':' + line + ':' + col;
+    console.error(errText);
+    // Show error visually in case console isn't accessible
+    const el = document.createElement('div');
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#f00;color:#fff;padding:8px;font-size:12px;z-index:99999;white-space:pre-wrap;';
+    el.textContent = errText + (error ? '\n' + error.stack : '');
+    document.body.appendChild(el);
+};
+</script>
+<script src="ton_io.js?v=20260325d"></script>
+<script src="ui.js?v=20260325d"></script>
 </body>
 </html>

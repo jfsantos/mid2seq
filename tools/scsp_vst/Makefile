@@ -61,9 +61,13 @@ include dpfwebui/Makefile.plugins.mk
 
 TARGETS += clap vst3 lv2_sep
 
-all: $(TARGETS) $(DPF_WEBUI_TARGET)
+# Copy shared ton_io.js into UI directory before building
+ui/ton_io.js: ../ton_io.js
+	cp $< $@
+
+all: ui/ton_io.js $(TARGETS) $(DPF_WEBUI_TARGET)
 
 clean:
-	rm -rf $(DPF_BUILD_DIR) $(DPF_TARGET_DIR)
+	rm -rf $(DPF_BUILD_DIR) $(DPF_TARGET_DIR) ui/ton_io.js
 
 .PHONY: all clean

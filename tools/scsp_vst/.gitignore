@@ -4,3 +4,6 @@ build/
 
 # Object file dependency tracking
 *.d
+
+# Copied at build time from ../ton_io.js
+ui/ton_io.js

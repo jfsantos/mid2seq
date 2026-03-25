@@ -8,7 +8,21 @@
 #include "DistrhoPlugin.hpp"
 #include <cstring>
 #include <cmath>
+#include <string>
 #include <vector>
+
+/* Minimal JSON number parser for load_patch state */
+static double jsonNumber(const char* &p) {
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    char* end;
+    double v = strtod(p, &end);
+    p = end;
+    return v;
+}
+static void jsonSkipTo(const char* &p, char c) {
+    while (*p && *p != c) p++;
+    if (*p == c) p++;
+}
 
 extern "C" {
 #include "scsp_voice.h"
@@ -126,7 +140,7 @@ class SCSPSynthPlugin : public Plugin
 {
 public:
     SCSPSynthPlugin()
-        : Plugin(kParameterCount, kNumPresets, 1 + MAX_OPS /* patch + wave_0..wave_5 */)
+        : Plugin(kParameterCount, kNumPresets, 3 + MAX_OPS /* patch + wave_0..wave_5 + kit_path + load_patch */)
     {
         std::memset(&fAlloc, 0, sizeof(fAlloc));
         std::memset(&fWaveStore, 0, sizeof(fWaveStore));
@@ -263,11 +277,108 @@ public:
             state.key = buf;
             state.label = buf;
             state.defaultValue = "";
+        } else if (index == 1 + MAX_OPS) {
+            state.key = "kit_path"; state.label = "Kit file path"; state.defaultValue = "";
+        } else if (index == 2 + MAX_OPS) {
+            state.key = "load_patch"; state.label = "Load patch data"; state.defaultValue = "";
         }
     }
 
     void setState(const char* key, const char* value) override
     {
+        /* Handle kit_path state */
+        if (std::strcmp(key, "kit_path") == 0) {
+            fKitPath = value ? value : "";
+            return;
+        }
+        /* Handle load_patch: JSON with operator params + base64 PCM.
+         * Format: "numOps|op0_ratio,op0_level,op0_ar,op0_d1r,op0_dl,op0_d2r,op0_rr,op0_fb,op0_mdl,op0_ms,op0_carrier,op0_lm,op0_ls,op0_le,op0_pcmLen,op0_pcmB64|op1_...|..."
+         * This bypasses the setParameterValue round-trip entirely. */
+        if (std::strcmp(key, "load_patch") == 0) {
+            if (!value || !value[0]) return;
+            const char* p = value;
+
+            /* Parse numOps */
+            int numOps = (int)jsonNumber(p);
+            if (numOps < 1) numOps = 1;
+            if (numOps > MAX_OPS) numOps = MAX_OPS;
+
+            /* Clear all params */
+            for (int i = 0; i < kParameterCount; i++) fParams[i] = 0.f;
+            fParams[kNumOps] = (float)numOps;
+
+            /* Parse each operator */
+            for (int i = 0; i < numOps && *p; i++) {
+                jsonSkipTo(p, '|');
+                float ratio   = (float)jsonNumber(p); jsonSkipTo(p, ',');
+                float level   = (float)jsonNumber(p); jsonSkipTo(p, ',');
+                float ar      = (float)jsonNumber(p); jsonSkipTo(p, ',');
+                float d1r     = (float)jsonNumber(p); jsonSkipTo(p, ',');
+                float dl      = (float)jsonNumber(p); jsonSkipTo(p, ',');
+                float d2r     = (float)jsonNumber(p); jsonSkipTo(p, ',');
+                float rr      = (float)jsonNumber(p); jsonSkipTo(p, ',');
+                float fb      = (float)jsonNumber(p); jsonSkipTo(p, ',');
+                float mdl     = (float)jsonNumber(p); jsonSkipTo(p, ',');
+                float ms      = (float)jsonNumber(p); jsonSkipTo(p, ',');
+                float carrier = (float)jsonNumber(p); jsonSkipTo(p, ',');
+                float lm      = (float)jsonNumber(p); jsonSkipTo(p, ',');
+                float ls      = (float)jsonNumber(p); jsonSkipTo(p, ',');
+                float le      = (float)jsonNumber(p); jsonSkipTo(p, ',');
+                int pcmLen    = (int)jsonNumber(p);   jsonSkipTo(p, ',');
+
+                fParams[opParamIndex(i, kOpFreqRatio)] = ratio;
+                fParams[opParamIndex(i, kOpLevel)]     = level;
+                fParams[opParamIndex(i, kOpAR)]        = ar;
+                fParams[opParamIndex(i, kOpD1R)]       = d1r;
+                fParams[opParamIndex(i, kOpDL)]        = dl;
+                fParams[opParamIndex(i, kOpD2R)]       = d2r;
+                fParams[opParamIndex(i, kOpRR)]        = rr;
+                fParams[opParamIndex(i, kOpFeedback)]  = fb;
+                fParams[opParamIndex(i, kOpMDL)]       = mdl;
+                fParams[opParamIndex(i, kOpModSource)] = ms;
+                fParams[kIsCarrier0 + i]               = carrier;
+                fParams[opParamIndex(i, kOpLoopMode)]  = lm;
+                fParams[opParamIndex(i, kOpLoopStart)] = ls;
+                fParams[opParamIndex(i, kOpLoopEnd)]   = le;
+
+                /* Load PCM waveform if present */
+                if (pcmLen > 0) {
+                    /* Remaining text until next | or end is base64 PCM */
+                    const char* b64start = p;
+                    const char* b64end = b64start;
+                    while (*b64end && *b64end != '|') b64end++;
+                    std::string b64str(b64start, b64end - b64start);
+                    p = b64end;
+
+                    std::vector<uint8_t> raw = decodeBase64(b64str.c_str());
+                    int numSamples = (int)(raw.size() / 2);
+                    if (numSamples > 0) {
+                        const int16_t *samples = reinterpret_cast<const int16_t*>(raw.data());
+                        int waveId = scsp_wave_store_add(&fWaveStore, samples, numSamples,
+                                                          0, numSamples, 1);
+                        if (waveId >= 0) {
+                            fCustomWaveIds[i] = waveId;
+                            fParams[opParamIndex(i, kOpWaveform)] = (float)waveId;
+                            fParams[opParamIndex(i, kOpLoopEnd)]  = (float)numSamples;
+                        }
+                    }
+                }
+            }
+
+            /* Default inactive ops */
+            for (int i = numOps; i < MAX_OPS; i++) {
+                fParams[opParamIndex(i, kOpFreqRatio)] = 1.f;
+                fParams[opParamIndex(i, kOpLevel)]     = 0.8f;
+                fParams[opParamIndex(i, kOpAR)]        = 31.f;
+                fParams[opParamIndex(i, kOpRR)]        = 14.f;
+                fParams[opParamIndex(i, kOpWaveform)]  = 0.f;
+                fParams[opParamIndex(i, kOpLoopMode)]  = 1.f;
+                fParams[opParamIndex(i, kOpLoopEnd)]   = 1024.f;
+            }
+
+            rebuildOps();
+            return;
+        }
         /* Handle custom waveform: key = "wave_N", value = base64-encoded int16 LE */
         if (std::strncmp(key, "wave_", 5) == 0) {
             int opIdx = key[5] - '0';
@@ -295,7 +406,9 @@ public:
 
     String getState(const char* key) const override
     {
-        (void)key;
+        if (std::strcmp(key, "kit_path") == 0) {
+            return String(fKitPath.c_str());
+        }
         return String();
     }
 
@@ -333,6 +446,7 @@ private:
     scsp_voice_alloc_t fAlloc;
     scsp_wave_store_t fWaveStore;
     int fCustomWaveIds[MAX_OPS]; /* per-op custom wave store IDs, -1 = none */
+    std::string fKitPath;
 
     static std::vector<uint8_t> decodeBase64(const char *input)
     {

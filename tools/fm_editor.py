@@ -37,9 +37,19 @@ def generate_html(presets_json="null"):
         wasm_b64 = ""
         glue_js = "var SCSPModule = () => Promise.resolve(null);"
 
+    # Load ton_io.js for TON import/export
+    ton_io_path = os.path.join(os.path.dirname(__file__), 'ton_io.js')
+    if os.path.exists(ton_io_path):
+        with open(ton_io_path, 'r') as f:
+            ton_io_js = f.read()
+    else:
+        print("[fm_editor] WARNING: ton_io.js not found. TON import/export disabled.")
+        ton_io_js = "var TonIO = null;"
+
     # Inject WASM data into the HTML template via placeholder replacement
     html = _HTML_TEMPLATE.replace('__SCSP_WASM_B64__', wasm_b64)
     html = html.replace('__SCSP_GLUE_JS__', glue_js)
+    html = html.replace('__TON_IO_JS__', ton_io_js)
     return html
 
 
@@ -151,6 +161,9 @@ body { font-family: 'SF Mono', Consolas, Monaco, monospace; background: #0f0f23;
     <h1>Saturn SCSP FM Patch Editor</h1>
     <button onclick="loadFile()">Load</button>
     <button onclick="exportFile()">Export JSON</button>
+    <button onclick="exportTonFile()">Export TON</button>
+    <button onclick="loadTonFile()">Load TON</button>
+    <button onclick="mergeToKitFile()">Merge to Kit</button>
     <button onclick="exportWav()">Export WAV</button>
   </div>
 
@@ -196,6 +209,12 @@ body { font-family: 'SF Mono', Consolas, Monaco, monospace; background: #0f0f23;
 <div id="alg-menu" style="display:none; position:fixed; background:#222; border:1px solid #555; border-radius:4px; padding:4px; z-index:100; max-height:300px; overflow-y:auto;">
 </div>
 
+<script>
+// ═══════════════════════════════════════════════════════════════
+// TON I/O MODULE (embedded from ton_io.js)
+// ═══════════════════════════════════════════════════════════════
+__TON_IO_JS__
+</script>
 <script>
 // ═══════════════════════════════════════════════════════════════
 // SCSP RATE TABLES (from MAME YMF292 documentation)
@@ -1678,6 +1697,134 @@ function loadFile() {
   input.click();
 }
 
+function exportTonFile() {
+  if (!TonIO) { alert('TON I/O not available'); return; }
+  // Build custom waves map: "patchIdx:opIdx" → Float32Array
+  const cw = {};
+  // customWaves only stores waves for current patch's operators;
+  // for a full export we regenerate built-in waveforms via generateWaveform.
+  // Custom waves in customWaves dict are keyed by op index for current patch only,
+  // so we skip them here (they'll be generated from the waveform type).
+
+  const tonData = TonIO.exportTon(patches, generateWaveform, cw);
+  const blob = new Blob([tonData], { type: 'application/octet-stream' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'fm_patches.ton'; a.click();
+  URL.revokeObjectURL(url);
+}
+
+function loadTonFile() {
+  if (!TonIO) { alert('TON I/O not available'); return; }
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.ton,.TON';
+  input.onchange = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const result = TonIO.importTon(ev.target.result);
+        if (!result.patches || result.patches.length === 0) {
+          alert('No voices found in TON file.');
+          return;
+        }
+        // Convert imported patches to editor format
+        patches = result.patches.map(p => ({
+          name: p.name,
+          operators: p.operators.map((op, oi) => ({
+            freq_ratio: op.freq_ratio,
+            freq_fixed: 0,
+            level: op.level,
+            ar: op.ar,
+            d1r: op.d1r,
+            dl: op.dl,
+            d2r: op.d2r,
+            rr: op.rr,
+            mdl: op.mdl,
+            mod_source: op.mod_source,
+            feedback: op.feedback,
+            is_carrier: op.is_carrier,
+            // Imported waveforms are custom PCM — use waveform index 0 as placeholder
+            waveform: 0,
+            loop_mode: op.loop_mode,
+            loop_start: op.loop_start,
+            loop_end: op.loop_end,
+          }))
+        }));
+        // Store imported PCM as custom waveforms so they render correctly
+        for (let pi = 0; pi < result.patches.length; pi++) {
+          for (let oi = 0; oi < result.patches[pi].operators.length; oi++) {
+            const pcm = result.patches[pi].operators[oi].pcm;
+            if (pcm && pcm.length > 0) {
+              // customWaves is per-selected-patch; we'll store for current patch
+              // and reload when switching patches
+              if (pi === 0) customWaves[oi] = pcm;
+            }
+          }
+        }
+        // Stash all imported PCM on the patch objects for later access
+        for (let pi = 0; pi < result.patches.length; pi++) {
+          for (let oi = 0; oi < result.patches[pi].operators.length; oi++) {
+            if (!patches[pi]._importedPcm) patches[pi]._importedPcm = {};
+            patches[pi]._importedPcm[oi] = result.patches[pi].operators[oi].pcm;
+          }
+        }
+        curPatch = 0; selOp = 0;
+        renderAll();
+      } catch (err) {
+        alert('Error loading TON: ' + err.message);
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+  input.click();
+}
+
+function mergeToKitFile() {
+  if (!TonIO) { alert('TON I/O not available'); return; }
+  // Step 1: Pick existing .ton file
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.ton,.TON';
+  input.onchange = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const existingBuffer = ev.target.result;
+        // Step 2: Ask which program slot
+        const slot = parseInt(prompt('Program slot number (0-15) for patch "' + patches[curPatch].name + '":', curPatch));
+        if (isNaN(slot) || slot < 0 || slot > 15) { alert('Invalid slot number.'); return; }
+        // Step 3: Merge current patch into that slot
+        const patch = {
+          name: patches[curPatch].name,
+          operators: patches[curPatch].operators.map(op => ({
+            freq_ratio: op.freq_ratio,
+            level: op.level, ar: op.ar, d1r: op.d1r, dl: op.dl, d2r: op.d2r, rr: op.rr,
+            mdl: op.mdl, mod_source: op.mod_source, feedback: op.feedback, is_carrier: op.is_carrier,
+            waveform: op.waveform, loop_mode: op.loop_mode !== undefined ? op.loop_mode : 1,
+            loop_start: op.loop_start || 0, loop_end: op.loop_end || WAVE_LEN,
+          })),
+        };
+        const merged = TonIO.mergeTon(existingBuffer, slot, patch, generateWaveform);
+        // Step 4: Download the merged file
+        const blob = new Blob([merged], { type: 'application/octet-stream' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = file.name; a.click();
+        URL.revokeObjectURL(url);
+      } catch (err) {
+        alert('Merge error: ' + err.message);
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+  input.click();
+}
+
 async function exportWav() {
   await initSCSP();
   const patch = patches[curPatch];
@@ -1772,6 +1919,13 @@ async function exportWav() {
 // ═══════════════════════════════════════════════════════════════
 
 function renderAll() {
+  // Restore imported PCM waveforms when switching patches
+  const p = patches[curPatch];
+  if (p && p._importedPcm) {
+    for (const [oi, pcm] of Object.entries(p._importedPcm)) {
+      customWaves[parseInt(oi)] = pcm;
+    }
+  }
   renderPatchList();
   renderOpGraph();
   renderOpParams();

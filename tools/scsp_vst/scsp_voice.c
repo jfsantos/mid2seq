@@ -126,6 +126,9 @@ void scsp_program_slot(int slot, const scsp_fm_op_t *op, int midi_note,
     int lsa    = op->loop_start >= 0 ? op->loop_start : wav->loop_start;
     int lea    = op->loop_end >= 0   ? op->loop_end   : wav->loop_end;
     int lpctl  = op->loop_mode >= 0  ? op->loop_mode  : wav->loop_mode;
+    /* Clamp to actual waveform length to prevent reading adjacent samples in RAM */
+    if (lsa > wav->length) lsa = wav->length;
+    if (lea > wav->length) lea = wav->length;
     int sa     = wav->ram_offset;
 
     /* FM constraint: if this operator participates in FM (modulator, or carrier
