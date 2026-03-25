@@ -1,0 +1,3 @@
+[submodule "tools/scsp_vst/dpfwebui"]
+	path = tools/scsp_vst/dpfwebui
+	url = https://github.com/lucianoiam/dpfwebui.git
