@@ -501,7 +501,7 @@ function programSlot(slot, op, midiNote, allOps) {
  * slotBase: first slot number of this instrument (for FM ring buffer offset fixup)
  * opIndex: index of this operator within the instrument
  */
-function programSlotRaw(slot, rawRegs, midiNote, sa, slotBase, opIndex, wavLen) {
+function programSlotRaw(slot, rawRegs, midiNote, sa, slotBase, opIndex, wavLen, modSource) {
     // Compute pitch from base_note — the MIDI note where this layer
     // plays at its natural pitch at OCT=0, FNS=0.
     // base_note accounts for both waveform length and freq_ratio.
@@ -521,23 +521,22 @@ function programSlotRaw(slot, rawRegs, midiNote, sa, slotBase, opIndex, wavLen) 
     // Fix up MDXSL/MDYSL for the actual slot layout.
     // The TON stores ring buffer offsets relative to the original layer indices.
     // In the tracker, operators are placed at consecutive slots starting at slotBase.
-    // The SCSP ring buffer offset formula: MDXSL = (source_slot - this_slot) & 63
+    // FM modulation: the SCSP uses a 64-entry ring buffer.
+    // MDXSL/MDYSL = (source_slot - this_slot) & 63.
+    // saturn_kit.py stores MDL but leaves MDXSL/MDYSL at 0 because the Saturn
+    // driver computes them at runtime. We must compute them from actual slot positions.
     let d7 = rawRegs.d7;
     const mdl = (d7 >> 12) & 0xF;
-    if (mdl > 0) {
-        const origMdxsl = (d7 >> 6) & 0x3F;
-        const origMdysl = d7 & 0x3F;
-        // Only remap if not self-feedback (self-fb uses offset 32)
-        let newMdxsl = origMdxsl;
-        let newMdysl = origMdysl;
-        if (origMdxsl !== 32) {
-            // Original: source was at layer index = (opIndex + origMdxsl) & 63
-            // In tracker: source is at slot (slotBase + (opIndex + origMdxsl) & 63)
-            // New offset: (source_slot - slot) & 63
-            // Since layers map 1:1 to consecutive slots, the relative offset is the same
-            // as long as ops are in the same order. No fixup needed for consecutive allocation.
-        }
-        d7 = ((mdl & 0xF) << 12) | ((newMdxsl & 0x3F) << 6) | (newMdysl & 0x3F);
+    if (mdl > 0 && modSource >= 0) {
+        // Cross-modulation: modulator is at slot (slotBase + modSource)
+        const modSlot = slotBase + modSource;
+        const mdxsl = (modSlot - slot) & 63;
+        const mdysl = mdxsl; // both point to same source (SCSP averages them)
+        d7 = ((mdl & 0xF) << 12) | ((mdxsl & 0x3F) << 6) | (mdysl & 0x3F);
+    } else if (mdl > 0) {
+        // Self-feedback: read 32 entries back (previous frame's own output)
+        const fbDist = 32;
+        d7 = ((mdl & 0xF) << 12) | ((fbDist & 0x3F) << 6) | (fbDist & 0x3F);
     }
 
     scsp._scsp_write_slot(slot, 0x0, d0);
@@ -882,12 +881,11 @@ function triggerNote(ch, midiNote, instIdx) {
             if (op.useTonSA) {
                 // TON loaded via bulk copy — SA is already correct in SCSP RAM.
                 const origSA = ((op.rawRegs.d0 & 0x0F) << 16) | op.rawRegs.sa;
-                if (i === 0 && ch === 0) console.log('[triggerNote] slot=' + slots[i] + ' SA=0x' + origSA.toString(16) + ' LEA=' + op.rawRegs.lea + ' note=' + midiNote + ' baseNote=' + op.rawRegs.baseNote);
-                programSlotRaw(slots[i], op.rawRegs, midiNote, origSA, slotBase, i, op.rawRegs.lea);
+                programSlotRaw(slots[i], op.rawRegs, midiNote, origSA, slotBase, i, op.rawRegs.lea, op.mod_source);
             } else {
                 // Imported from TON with individual waveform loading
                 const wav = waveStore.waves[op.waveform || 0] || waveStore.waves[0];
-                programSlotRaw(slots[i], op.rawRegs, midiNote, wav.offset, slotBase, i, wav.length);
+                programSlotRaw(slots[i], op.rawRegs, midiNote, wav.offset, slotBase, i, wav.length, op.mod_source);
             }
         } else {
             // Built-in preset — use computed programSlot
@@ -1345,6 +1343,50 @@ async function importTonInst() {
     input.click();
 }
 
+/* Recompute rawRegs from the current panel parameter values.
+ * Called whenever the user edits an instrument parameter so that
+ * programSlotRaw uses the updated values. */
+function syncRawRegs(op) {
+    if (!op.rawRegs) return; // built-in preset, no rawRegs to sync
+
+    // freq_ratio → baseNote
+    if (op.freq_ratio > 0) {
+        const ratioSemitones = Math.round(12 * Math.log2(op.freq_ratio));
+        op.rawRegs.baseNote = Math.max(0, Math.min(127, 69 - ratioSemitones));
+    }
+
+    // level → TL (saturn_kit.py convention: tl = (1 - level) * 128)
+    op.rawRegs.tl = Math.max(0, Math.min(255, Math.round((1.0 - (op.level || 0)) * 128)));
+
+    // AR, D1R, D2R → d4: D2R[15:11] | D1R[10:6] | AR[4:0]
+    const ar = Math.round(op.ar || 0) & 0x1F;
+    const d1r = Math.round(op.d1r || 0) & 0x1F;
+    const d2r = Math.round(op.d2r || 0) & 0x1F;
+    op.rawRegs.d4 = (d2r << 11) | (d1r << 6) | ar;
+
+    // DL, RR → d5: KRS[13:10] | DL[9:5] | RR[4:0] (preserve KRS from original)
+    const krs = (op.rawRegs.d5 >> 10) & 0xF; // keep original KRS
+    const dl = Math.round(op.dl || 0) & 0x1F;
+    const rr = Math.round(op.rr || 0) & 0x1F;
+    op.rawRegs.d5 = (krs << 10) | (dl << 5) | rr;
+
+    // MDL → d7 bits [15:12] (MDXSL/MDYSL are computed at play time, leave them)
+    const mdl = Math.round(op.mdl || 0) & 0xF;
+    op.rawRegs.d7 = (op.rawRegs.d7 & 0x0FFF) | (mdl << 12);
+
+    // is_carrier → DISDL in dB upper byte
+    const disdl = op.is_carrier ? 7 : 0;
+    const dipan = (op.rawRegs.dB >> 8) & 0x1F; // preserve original DIPAN
+    op.rawRegs.dB = ((disdl << 5) | dipan) << 8 | (op.rawRegs.dB & 0xFF);
+
+    // Update loop points
+    op.rawRegs.lsa = op.loop_start || 0;
+    op.rawRegs.lea = op.loop_end || 1024;
+    // Update LPCTL in d0
+    const lpctl = (op.loop_mode !== undefined ? op.loop_mode : 1) & 3;
+    op.rawRegs.d0 = (op.rawRegs.d0 & 0x1F) | (lpctl << 5);
+}
+
 function renderInstEditor() {
     const el = document.getElementById('inst-editor');
     el.innerHTML = '';
@@ -1405,7 +1447,7 @@ function renderInstEditor() {
         const inp = document.createElement('input'); inp.type = 'range';
         inp.min = p.min; inp.max = p.max; inp.step = p.step; inp.value = op[p.key] || 0;
         const val = document.createElement('span'); val.className = 'val'; val.textContent = p.fmt(op[p.key] || 0);
-        inp.oninput = () => { op[p.key] = parseFloat(inp.value); val.textContent = p.fmt(op[p.key]); };
+        inp.oninput = () => { op[p.key] = parseFloat(inp.value); val.textContent = p.fmt(op[p.key]); syncRawRegs(op); };
         row.appendChild(lbl); row.appendChild(inp); row.appendChild(val);
         el.appendChild(row);
     }
@@ -1420,7 +1462,7 @@ function renderInstEditor() {
         const o = document.createElement('option'); o.value = i; o.textContent = 'Op' + (i + 1); msSel.appendChild(o);
     }
     msSel.value = op.mod_source;
-    msSel.onchange = () => { op.mod_source = parseInt(msSel.value); };
+    msSel.onchange = () => { op.mod_source = parseInt(msSel.value); syncRawRegs(op); };
     msRow.appendChild(msLbl); msRow.appendChild(msSel); el.appendChild(msRow);
 
     // Waveform dropdown
@@ -1431,14 +1473,14 @@ function renderInstEditor() {
         const o = document.createElement('option'); o.value = i; o.textContent = name; wvSel.appendChild(o);
     });
     wvSel.value = op.waveform || 0;
-    wvSel.onchange = () => { op.waveform = parseInt(wvSel.value); };
+    wvSel.onchange = () => { op.waveform = parseInt(wvSel.value); syncRawRegs(op); };
     wvRow.appendChild(wvLbl); wvRow.appendChild(wvSel); el.appendChild(wvRow);
 
     // Carrier toggle
     const cRow = document.createElement('div'); cRow.className = 'op-param';
     const cLbl = document.createElement('label'); cLbl.textContent = 'Carrier';
     const cChk = document.createElement('input'); cChk.type = 'checkbox'; cChk.checked = op.is_carrier;
-    cChk.onchange = () => { op.is_carrier = cChk.checked; renderInstEditor(); };
+    cChk.onchange = () => { op.is_carrier = cChk.checked; syncRawRegs(op); renderInstEditor(); };
     cRow.appendChild(cLbl); cRow.appendChild(cChk); el.appendChild(cRow);
 
     // Test button
