@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-saturn_tracker.py — Saturn SCSP FM Tracker.
+saturn_tracker.py — Bebhionn — Saturn SCSP FM Tracker.
 
 Browser-based classic vertical tracker for composing music using the
 hardware-accurate SCSP (YMF292-F) emulator. Exports SEQ + TON files
@@ -76,7 +76,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
-<title>Saturn SCSP Tracker</title>
+<title>Bebhionn</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: 'SF Mono', Consolas, Monaco, monospace; background: #0a0a1a; color: #ccc;
@@ -192,7 +192,7 @@ body { font-family: 'SF Mono', Consolas, Monaco, monospace; background: #0a0a1a;
 
 <!-- Transport -->
 <div id="transport">
-  <h1>Saturn Tracker</h1>
+  <h1>Bebhionn</h1>
   <button id="btn-play" onclick="togglePlay()">&#9654; Play</button>
   <button id="btn-stop" onclick="stopPlayback()">&#9632; Stop</button>
   <span class="transport-sep">|</span>
@@ -219,6 +219,13 @@ body { font-family: 'SF Mono', Consolas, Monaco, monospace; background: #0a0a1a;
   <div class="transport-group">
     <label>Oct</label>
     <input id="octave" type="number" value="4" min="1" max="7" style="width:35px;">
+  </div>
+  <div class="transport-group">
+    <label>MIDI In</label>
+    <select id="midi-input" onchange="selectMidiInput(this.value)">
+      <option value="">-- None --</option>
+    </select>
+    <button id="btn-midi-live" onclick="toggleMidiLive()">Live</button>
   </div>
   <span class="transport-sep">|</span>
   <button onclick="exportTON()">Export TON</button>
@@ -1133,25 +1140,125 @@ document.addEventListener('keydown', async (e) => {
     if (noteOffset !== undefined) {
         e.preventDefault();
         const midi = getOctave() * 12 + noteOffset;
-        if (midi < 0 || midi > 127) return;
-
-        const cell = pat.channels[cur.ch].rows[cur.row];
-        cell.note = midi;
-        if (cell.inst === null) cell.inst = pat.channels[cur.ch].defaultInst;
-
-        // Preview the note
-        await initSCSP();
-        ensureAudio();
-        if (cell.inst < state.instruments.length) {
-            triggerNote(cur.ch, midi, cell.inst);
-            setTimeout(() => voiceAlloc.release(cur.ch), 300);
-        }
-
-        cur.row = Math.min(cur.row + 1, pat.length - 1);
-        renderGrid();
+        if (midi >= 0 && midi <= 127) stepEntryNote(midi);
         return;
     }
 });
+
+async function stepEntryNote(midi, velocity) {
+    const pat = getCurrentPattern();
+    const cur = state.cursor;
+    const cell = pat.channels[cur.ch].rows[cur.row];
+    cell.note = midi;
+    if (cell.inst === null) cell.inst = pat.channels[cur.ch].defaultInst;
+    if (velocity !== undefined) cell.vol = velocity;
+
+    // Preview the note
+    await initSCSP();
+    ensureAudio();
+    if (cell.inst < state.instruments.length) {
+        triggerNote(cur.ch, midi, cell.inst);
+        setTimeout(() => voiceAlloc.release(cur.ch), 300);
+    }
+
+    cur.row = Math.min(cur.row + 1, pat.length - 1);
+    renderGrid();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MIDI KEYBOARD INPUT (Web MIDI API)
+// ═══════════════════════════════════════════════════════════════
+
+let midiAccess = null;
+let activeMidiInput = null;
+
+let midiLiveMode = false;
+const MIDI_LIVE_CH_BASE = 100; // preview channels for live MIDI play
+const midiLiveNotes = new Map(); // note -> preview channel
+
+function onMidiMessage(e) {
+    const [status, note, velocity] = e.data;
+    const cmd = status & 0xF0;
+    const isNoteOn = cmd === 0x90 && velocity > 0;
+    const isNoteOff = cmd === 0x80 || (cmd === 0x90 && velocity === 0);
+
+    if (midiLiveMode) {
+        if (isNoteOn) {
+            initSCSP().then(() => {
+                ensureAudio();
+                const ch = MIDI_LIVE_CH_BASE + (note % 16);
+                midiLiveNotes.set(note, ch);
+                triggerNote(ch, note, selectedInst);
+            });
+        } else if (isNoteOff && midiLiveNotes.has(note)) {
+            voiceAlloc.release(midiLiveNotes.get(note));
+            midiLiveNotes.delete(note);
+        }
+    } else {
+        if (isNoteOn) stepEntryNote(note, velocity);
+    }
+}
+
+function toggleMidiLive() {
+    midiLiveMode = !midiLiveMode;
+    const btn = document.getElementById('btn-midi-live');
+    btn.classList.toggle('active', midiLiveMode);
+    // Release any held notes when toggling off
+    if (!midiLiveMode) {
+        for (const ch of midiLiveNotes.values()) voiceAlloc.release(ch);
+        midiLiveNotes.clear();
+    }
+}
+
+function selectMidiInput(id) {
+    // Disconnect previous
+    if (activeMidiInput) {
+        activeMidiInput.onmidimessage = null;
+        activeMidiInput = null;
+    }
+    if (!id || !midiAccess) return;
+    const input = midiAccess.inputs.get(id);
+    if (input) {
+        input.onmidimessage = onMidiMessage;
+        activeMidiInput = input;
+    }
+}
+
+function refreshMidiDevices() {
+    const sel = document.getElementById('midi-input');
+    const prevValue = sel.value;
+    // Keep the "None" option, remove the rest
+    while (sel.options.length > 1) sel.remove(1);
+    if (!midiAccess) return;
+    for (const [id, input] of midiAccess.inputs) {
+        const opt = document.createElement('option');
+        opt.value = id;
+        opt.textContent = input.name;
+        sel.appendChild(opt);
+    }
+    // Re-select previous device if still present
+    if (prevValue && midiAccess.inputs.has(prevValue)) {
+        sel.value = prevValue;
+        selectMidiInput(prevValue);
+    } else if (activeMidiInput) {
+        // Device was removed
+        activeMidiInput = null;
+        sel.value = '';
+    }
+}
+
+if (navigator.requestMIDIAccess) {
+    navigator.requestMIDIAccess().then(access => {
+        midiAccess = access;
+        refreshMidiDevices();
+        access.onstatechange = () => refreshMidiDevices();
+    }).catch(err => console.warn('Web MIDI not available:', err));
+} else {
+    const sel = document.getElementById('midi-input');
+    sel.options[0].textContent = '-- Not supported (use Chrome) --';
+    sel.disabled = true;
+    document.getElementById('btn-midi-live').disabled = true;
+}
 
 // ═══════════════════════════════════════════════════════════════
 // TRANSPORT CONTROLS
@@ -2087,7 +2194,7 @@ if (DEMO_MIDI_B64) {
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description='Saturn SCSP Tracker')
+    parser = argparse.ArgumentParser(description='Bebhionn — Saturn SCSP FM Tracker')
     parser.add_argument('-o', '--output', help='Output HTML file')
     parser.add_argument('--no-open', action='store_true', help='Do not open in browser')
     args = parser.parse_args()
@@ -2097,7 +2204,7 @@ def main():
     if args.output:
         out_path = args.output
     else:
-        fd, out_path = tempfile.mkstemp(suffix='.html', prefix='saturn_tracker_')
+        fd, out_path = tempfile.mkstemp(suffix='.html', prefix='bebhionn_')
         os.close(fd)
 
     with open(out_path, 'w') as f:
