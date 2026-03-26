@@ -174,7 +174,11 @@ body { font-family: 'SF Mono', Consolas, Monaco, monospace; background: #0a0a1a;
 .op-param { display: flex; align-items: center; gap: 4px; margin-bottom: 3px; font-size: 10px; }
 .op-param label { color: #888; width: 40px; text-align: right; flex-shrink: 0; }
 .op-param input[type="range"] { flex: 1; accent-color: #00d4ff; }
-.op-param .val { color: #00d4ff; width: 35px; text-align: right; font-size: 9px; }
+.op-param .val { color: #00d4ff; width: 42px; text-align: right; font-size: 9px;
+  background: #1a1a2e; border: 1px solid #333; border-radius: 2px; padding: 0 2px;
+  font-family: inherit; -moz-appearance: textfield; }
+.op-param .val::-webkit-inner-spin-button,
+.op-param .val::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 .op-param select { background: #222; color: #ccc; border: 1px solid #444; font-family: inherit;
                     font-size: 9px; border-radius: 2px; flex: 1; }
 .op-tab { display: inline-block; padding: 2px 8px; background: #1a1a3a; border: 1px solid #333;
@@ -182,6 +186,46 @@ body { font-family: 'SF Mono', Consolas, Monaco, monospace; background: #0a0a1a;
 .op-tab:hover { background: #2a2a4e; }
 .op-tab.sel { background: #222244; color: #00d4ff; }
 .op-tab.carrier { color: #4a4; }
+
+/* Instrument detail panel (expandable bottom) */
+#inst-detail { height: 0; background: #12122a; border-top: 1px solid #333; flex-shrink: 0;
+               overflow: hidden; transition: height 0.2s ease; display: flex; flex-direction: column; }
+#inst-detail.open { height: 280px; }
+#inst-detail-header { display: flex; align-items: center; padding: 4px 12px; gap: 8px;
+                       background: #14142e; border-bottom: 1px solid #333; flex-shrink: 0; }
+#inst-detail-header h3 { font-size: 11px; color: #00d4ff; flex: 1; }
+#inst-detail-header button { background: #2a2a4e; color: #ccc; border: 1px solid #444; padding: 2px 8px;
+                              cursor: pointer; border-radius: 3px; font-family: inherit; font-size: 10px; }
+#inst-detail-header button:hover { background: #3a3a5e; }
+#inst-detail-body { flex: 1; display: flex; gap: 12px; padding: 8px 12px; overflow-x: auto; min-height: 0; }
+.detail-section { background: #1a1a2e; border: 1px solid #333; border-radius: 6px; padding: 8px;
+                  display: flex; flex-direction: column; min-width: 0; }
+.detail-section h4 { font-size: 10px; color: #888; margin-bottom: 4px; flex-shrink: 0; }
+.detail-section canvas { width: 100%; flex: 1; display: block; border-radius: 4px; background: #12122a; min-height: 0; }
+#env-section { flex: 2; }
+#wave-section { flex: 1; }
+#routing-section { flex: 1; min-width: 160px; position: relative; }
+#env-time-label { color: #555; font-weight: normal; font-size: 9px; }
+#wave-controls { display: flex; gap: 6px; align-items: center; margin-top: 4px; flex-shrink: 0; font-size: 10px; }
+#wave-controls select, #wave-controls input { background: #222; color: #ccc; border: 1px solid #444;
+  font-family: inherit; font-size: 9px; border-radius: 2px; padding: 1px 3px; }
+#wave-controls input[type="range"] { flex: 1; accent-color: #00d4ff; min-width: 50px; }
+#wave-controls label { color: #888; white-space: nowrap; }
+#wave-controls button { background: #2a3a2e; color: #8c8; border: 1px solid #4a4; padding: 2px 6px;
+  cursor: pointer; border-radius: 3px; font-family: inherit; font-size: 9px; }
+#wave-controls button:hover { background: #3a4a3e; }
+#op-graph-mini { display: flex; gap: 6px; flex-wrap: wrap; align-items: flex-start; flex: 1; }
+#op-graph-mini svg { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
+.op-box-mini { background: #222244; border: 2px solid #444; border-radius: 4px; padding: 4px 8px;
+               cursor: pointer; text-align: center; font-size: 9px; user-select: none; z-index: 1; position: relative; }
+.op-box-mini:hover { border-color: #666; }
+.op-box-mini.sel { border-color: #00d4ff; }
+.op-box-mini.carrier { border-color: #4a4; }
+.op-box-mini.carrier.sel { border-color: #0f0; }
+.op-box-mini .op-name { font-weight: bold; color: #ddd; font-size: 10px; }
+.op-box-mini .op-role { font-size: 8px; }
+.op-box-mini .op-role.car { color: #4a4; }
+.op-box-mini .op-role.mod { color: #a84; }
 
 #status { padding: 4px 12px; background: #12122a; border-top: 1px solid #333; font-size: 10px;
           color: #666; flex-shrink: 0; display: flex; gap: 20px; }
@@ -272,8 +316,38 @@ body { font-family: 'SF Mono', Consolas, Monaco, monospace; background: #0a0a1a;
         <button onclick="dupInstrument()">Dup</button>
         <button onclick="delInstrument()">Del</button>
         <button onclick="importTonInst()">Load TON</button>
+        <button onclick="toggleInstDetail()" style="background:#2a3a4e;color:#4cf;">Edit</button>
       </div>
       <div id="inst-editor"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Instrument detail panel (expandable) -->
+<div id="inst-detail">
+  <div id="inst-detail-header">
+    <h3 id="inst-detail-title">Instrument Editor</h3>
+    <span id="env-time-label"></span>
+    <select id="wave-preset" onchange="applyWavePreset(this.value)" style="background:#222;color:#ccc;border:1px solid #444;font-family:inherit;font-size:10px;border-radius:2px;padding:2px 4px;">
+      <option value="" disabled selected>Wave preset...</option>
+    </select>
+    <button onclick="loadWavForOp()">Load WAV</button>
+    <button onclick="toggleInstDetail()">Close</button>
+  </div>
+  <div id="inst-detail-body">
+    <div class="detail-section" id="env-section">
+      <h4>Envelope</h4>
+      <canvas id="env-canvas"></canvas>
+    </div>
+    <div class="detail-section" id="wave-section">
+      <h4>Waveform</h4>
+      <canvas id="wave-canvas"></canvas>
+      <div id="wave-controls"></div>
+    </div>
+    <div class="detail-section" id="routing-section">
+      <h4>Routing</h4>
+      <svg id="routing-svg"></svg>
+      <div id="op-graph-mini"></div>
     </div>
   </div>
 </div>
@@ -304,6 +378,23 @@ const WAVE_BYTES = WAVE_LEN * 2;
 const SINE_BASE_FREQ = SAMPLE_RATE / WAVE_LEN;
 const SINE_BASE_NOTE = 69 + 12 * Math.log2(SINE_BASE_FREQ / 440);
 const WAVE_NAMES = ['Sine','Sawtooth','Square','Triangle','Organ','Brass','Strings','Piano','Flute','Bass'];
+const LOOP_NAMES = ['Off','Forward','Reverse','Ping-pong'];
+
+const AR_TIMES = [
+  100000, 100000, 8100, 6900, 6000, 4800, 4000, 3400,
+  3000, 2400, 2000, 1700, 1500, 1200, 1000, 860,
+  760, 600, 500, 430, 380, 300, 250, 220,
+  190, 150, 130, 110, 95, 76, 63, 55
+];
+const DR_TIMES = [
+  100000, 100000, 118200, 101300, 88600, 70900, 59100, 50700,
+  44300, 35500, 29600, 25300, 22200, 17700, 14800, 12700,
+  11100, 8900, 7400, 6300, 5500, 4400, 3700, 3200,
+  2800, 2200, 1800, 1600, 1400, 1100, 920, 790
+];
+
+const customWaves = {};
+
 const MAX_SLOTS = 32;
 const NUM_CHANNELS = 8;
 
@@ -876,6 +967,36 @@ const playback = {
 // NOTE TRIGGERING (shared by playback + keyboard preview)
 // ═══════════════════════════════════════════════════════════════
 
+// Re-program SCSP slots for any active preview voice (ch=99 or MIDI live channels)
+// so parameter changes are heard immediately without re-triggering.
+function liveUpdatePreview() {
+    if (!scsp) return;
+    for (const v of voiceAlloc.voices) {
+        if (v.ch === 99 || v.ch >= MIDI_LIVE_CH_BASE) {
+            // Find which instrument this voice belongs to
+            const inst = state.instruments[selectedInst];
+            if (!inst) continue;
+            const ops = inst.operators;
+            if (v.slots.length !== ops.length) continue;
+            const slotBase = v.slots[0];
+            for (let i = 0; i < ops.length; i++) {
+                const op = ops[i];
+                if (op.rawRegs) {
+                    if (op.useTonSA) {
+                        const origSA = ((op.rawRegs.d0 & 0x0F) << 16) | op.rawRegs.sa;
+                        programSlotRaw(v.slots[i], op.rawRegs, v.note, origSA, slotBase, i, op.rawRegs.lea, op.mod_source);
+                    } else {
+                        const wav = waveStore.waves[op.waveform || 0] || waveStore.waves[0];
+                        programSlotRaw(v.slots[i], op.rawRegs, v.note, wav.offset, slotBase, i, wav.length, op.mod_source);
+                    }
+                } else {
+                    programSlot(v.slots[i], op, v.note, ops);
+                }
+            }
+        }
+    }
+}
+
 function triggerNote(ch, midiNote, instIdx) {
     const inst = state.instruments[instIdx];
     if (!inst) { console.warn('[triggerNote] no inst at', instIdx); return; }
@@ -1367,6 +1488,7 @@ function renderAll() {
     renderChannelHeaders();
     renderGrid();
     renderInstList();
+    refreshInstDetail();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1391,7 +1513,7 @@ function renderInstList() {
         div.className = 'inst-item' + (i === selectedInst ? ' sel' : '');
         div.innerHTML = '<span><span class="inst-num">' + i.toString(16).toUpperCase().padStart(2, '0') + '</span>' + inst.name + '</span>' +
                         '<span style="color:#555;">' + inst.operators.length + 'op</span>';
-        div.onclick = () => { selectedInst = i; selectedOp = 0; renderInstList(); renderInstEditor(); };
+        div.onclick = () => { selectedInst = i; selectedOp = 0; renderInstList(); renderInstEditor(); refreshInstDetail(); };
         div.ondblclick = () => {
             const name = prompt('Rename instrument:', inst.name);
             if (name) { inst.name = name; renderInstList(); renderChannelHeaders(); }
@@ -1507,7 +1629,7 @@ function renderInstEditor() {
         const tab = document.createElement('span');
         tab.className = 'op-tab' + (i === selectedOp ? ' sel' : '') + (inst.operators[i].is_carrier ? ' carrier' : '');
         tab.textContent = 'Op' + (i + 1);
-        tab.onclick = () => { selectedOp = i; renderInstEditor(); };
+        tab.onclick = () => { selectedOp = i; renderInstEditor(); refreshInstDetail(); };
         tabBar.appendChild(tab);
     }
     // Add/remove op buttons
@@ -1553,9 +1675,12 @@ function renderInstEditor() {
         const lbl = document.createElement('label'); lbl.textContent = p.label;
         const inp = document.createElement('input'); inp.type = 'range';
         inp.min = p.min; inp.max = p.max; inp.step = p.step; inp.value = op[p.key] || 0;
-        const val = document.createElement('span'); val.className = 'val'; val.textContent = p.fmt(op[p.key] || 0);
-        inp.oninput = () => { op[p.key] = parseFloat(inp.value); val.textContent = p.fmt(op[p.key]); syncRawRegs(op); };
-        row.appendChild(lbl); row.appendChild(inp); row.appendChild(val);
+        const numInp = document.createElement('input'); numInp.type = 'number'; numInp.className = 'val';
+        numInp.min = p.min; numInp.max = p.max; numInp.step = p.step; numInp.value = p.fmt(op[p.key] || 0);
+        const update = (v) => { op[p.key] = v; syncRawRegs(op); liveUpdatePreview(); };
+        inp.oninput = () => { const v = parseFloat(inp.value); numInp.value = p.fmt(v); update(v); };
+        numInp.onchange = () => { let v = parseFloat(numInp.value); v = Math.max(p.min, Math.min(p.max, v)); numInp.value = p.fmt(v); inp.value = v; update(v); };
+        row.appendChild(lbl); row.appendChild(inp); row.appendChild(numInp);
         el.appendChild(row);
     }
 
@@ -1569,25 +1694,14 @@ function renderInstEditor() {
         const o = document.createElement('option'); o.value = i; o.textContent = 'Op' + (i + 1); msSel.appendChild(o);
     }
     msSel.value = op.mod_source;
-    msSel.onchange = () => { op.mod_source = parseInt(msSel.value); syncRawRegs(op); };
+    msSel.onchange = () => { op.mod_source = parseInt(msSel.value); syncRawRegs(op); liveUpdatePreview(); };
     msRow.appendChild(msLbl); msRow.appendChild(msSel); el.appendChild(msRow);
-
-    // Waveform dropdown
-    const wvRow = document.createElement('div'); wvRow.className = 'op-param';
-    const wvLbl = document.createElement('label'); wvLbl.textContent = 'Wave';
-    const wvSel = document.createElement('select');
-    WAVE_NAMES.forEach((name, i) => {
-        const o = document.createElement('option'); o.value = i; o.textContent = name; wvSel.appendChild(o);
-    });
-    wvSel.value = op.waveform || 0;
-    wvSel.onchange = () => { op.waveform = parseInt(wvSel.value); syncRawRegs(op); };
-    wvRow.appendChild(wvLbl); wvRow.appendChild(wvSel); el.appendChild(wvRow);
 
     // Carrier toggle
     const cRow = document.createElement('div'); cRow.className = 'op-param';
     const cLbl = document.createElement('label'); cLbl.textContent = 'Carrier';
     const cChk = document.createElement('input'); cChk.type = 'checkbox'; cChk.checked = op.is_carrier;
-    cChk.onchange = () => { op.is_carrier = cChk.checked; syncRawRegs(op); renderInstEditor(); };
+    cChk.onchange = () => { op.is_carrier = cChk.checked; syncRawRegs(op); liveUpdatePreview(); renderInstEditor(); };
     cRow.appendChild(cLbl); cRow.appendChild(cChk); el.appendChild(cRow);
 
     // Test button
@@ -1603,6 +1717,474 @@ function renderInstEditor() {
     testRow.appendChild(testBtn);
     el.appendChild(testRow);
 }
+
+// ═══════════════════════════════════════════════════════════════
+// INSTRUMENT DETAIL PANEL (envelope, waveform, routing)
+// ═══════════════════════════════════════════════════════════════
+
+function toggleInstDetail() {
+    const panel = document.getElementById('inst-detail');
+    panel.classList.toggle('open');
+    if (panel.classList.contains('open')) {
+        // Wait for CSS transition to finish so canvases get correct dimensions
+        panel.addEventListener('transitionend', function onEnd() {
+            panel.removeEventListener('transitionend', onEnd);
+            refreshInstDetail();
+        });
+    }
+}
+
+function refreshInstDetail() {
+    const panel = document.getElementById('inst-detail');
+    if (!panel.classList.contains('open')) return;
+    const inst = state.instruments[selectedInst];
+    if (!inst) return;
+    document.getElementById('inst-detail-title').textContent = inst.name + ' — Op' + (selectedOp + 1);
+    // Populate wave preset dropdown
+    const wps = document.getElementById('wave-preset');
+    const prevLen = wps.options.length;
+    if (prevLen <= 1) {
+        WAVE_NAMES.forEach((name, i) => {
+            const o = document.createElement('option'); o.value = i; o.textContent = name;
+            wps.appendChild(o);
+        });
+    }
+    wps.selectedIndex = 0; // reset to placeholder
+    drawEnvelope();
+    drawWaveformPreview();
+    drawRouting();
+    renderWaveControls();
+}
+
+function applyWavePreset(val) {
+    const wid = parseInt(val);
+    if (isNaN(wid)) return;
+    const inst = state.instruments[selectedInst];
+    if (!inst) return;
+    const op = inst.operators[selectedOp];
+    if (!op) return;
+    op.waveform = wid;
+    op.useTonSA = false;
+    op.loop_start = 0;
+    op.loop_end = WAVE_LEN;
+    op.loop_mode = 1;
+    // Clear custom wave for this op
+    delete customWaves[selectedInst + '_' + selectedOp];
+    syncRawRegs(op);
+    liveUpdatePreview();
+    refreshInstDetail();
+    document.getElementById('wave-preset').selectedIndex = 0;
+}
+
+// --- Envelope visualization ---
+
+const EG_SLOPE = 12.0;
+
+function drawEnvelope() {
+    const canvas = document.getElementById('env-canvas');
+    if (!canvas) return;
+    const rect = canvas.parentElement.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = rect.width * dpr;
+    canvas.height = (rect.height - 20) * dpr;
+    canvas.style.height = (rect.height - 20) + 'px';
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+    const w = rect.width, h = rect.height - 20;
+
+    ctx.fillStyle = '#12122a';
+    ctx.fillRect(0, 0, w, h);
+
+    // Grid
+    ctx.strokeStyle = '#1a1a3a'; ctx.lineWidth = 0.5;
+    for (let y = 0; y <= h; y += h / 4) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+    }
+
+    const inst = state.instruments[selectedInst];
+    if (!inst || !inst.operators.length) return;
+
+    const margin = 10;
+    const drawW = w - margin * 2;
+    const drawH = h - margin * 2;
+
+    inst.operators.forEach((op, oi) => {
+        if (oi === selectedOp) return;
+        drawOneEnvelope(ctx, op, oi, margin, drawW, drawH, h, false);
+    });
+    drawOneEnvelope(ctx, inst.operators[selectedOp], selectedOp, margin, drawW, drawH, h, true);
+}
+
+function drawOneEnvelope(ctx, op, oi, margin, drawW, drawH, h, isSelected) {
+    const arMs = AR_TIMES[Math.min(op.ar, 31)];
+    const d1rMs = op.d1r > 0 ? DR_TIMES[Math.min(op.d1r, 31)] : 100000;
+    const sustainLevel = op.dl < 31 ? 1.0 - op.dl / 31.0 : 0.0;
+    const d2rMs = op.d2r > 0 ? DR_TIMES[Math.min(op.d2r, 31)] : 100000;
+    const rrMs = DR_TIMES[Math.min(op.rr, 31)];
+
+    const VIS_FRAC = 0.23;
+    const d1VisMs = d1rMs * VIS_FRAC;
+    const holdWindow = 500;
+    const rrVisMs = rrMs * VIS_FRAC;
+
+    const d2decay = Math.exp(-EG_SLOPE * holdWindow / d2rMs);
+    const levelAtNoteOff = sustainLevel * d2decay;
+
+    const totalMs = arMs + d1VisMs + holdWindow + rrVisMs;
+    const scale = drawW / Math.max(totalMs, 100);
+    const bottom = h - margin;
+    const nSteps = 60;
+
+    ctx.beginPath();
+    let cx = margin;
+
+    // Attack
+    ctx.moveTo(cx, bottom);
+    cx += arMs * scale;
+    ctx.lineTo(cx, bottom - drawH);
+    const d1StartX = cx;
+
+    // D1
+    for (let i = 1; i <= nSteps; i++) {
+        const t = i / nSteps;
+        const tMs = t * d1VisMs;
+        const lv = sustainLevel + (1.0 - sustainLevel) * Math.exp(-EG_SLOPE * tMs / d1rMs);
+        ctx.lineTo(d1StartX + tMs * scale, bottom - drawH * lv);
+    }
+    cx = d1StartX + d1VisMs * scale;
+
+    // D2 during hold
+    const d2StartX = cx;
+    for (let i = 1; i <= nSteps; i++) {
+        const t = i / nSteps;
+        const tMs = t * holdWindow;
+        const lv = sustainLevel * Math.exp(-EG_SLOPE * tMs / d2rMs);
+        ctx.lineTo(d2StartX + tMs * scale, bottom - drawH * lv);
+    }
+    const noteOffX = d2StartX + holdWindow * scale;
+    cx = noteOffX;
+
+    // Release
+    const relStartX = cx;
+    for (let i = 1; i <= nSteps; i++) {
+        const t = i / nSteps;
+        const tMs = t * rrVisMs;
+        const lv = levelAtNoteOff * Math.exp(-EG_SLOPE * tMs / rrMs);
+        ctx.lineTo(relStartX + tMs * scale, bottom - drawH * lv);
+    }
+
+    if (isSelected) {
+        ctx.strokeStyle = op.is_carrier ? '#00d4ff' : '#ffaa44';
+        ctx.lineWidth = 2;
+    } else {
+        ctx.strokeStyle = op.is_carrier ? 'rgba(0,212,255,0.25)' : 'rgba(255,170,68,0.25)';
+        ctx.lineWidth = 1;
+    }
+    ctx.stroke();
+
+    if (isSelected) {
+        // Fill under curve
+        ctx.lineTo(relStartX + rrVisMs * scale, bottom);
+        ctx.lineTo(margin, bottom);
+        ctx.closePath();
+        ctx.fillStyle = op.is_carrier ? 'rgba(0,212,255,0.08)' : 'rgba(255,170,68,0.08)';
+        ctx.fill();
+
+        // Note-off marker
+        ctx.save();
+        ctx.strokeStyle = '#666'; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+        ctx.beginPath(); ctx.moveTo(noteOffX, margin); ctx.lineTo(noteOffX, bottom); ctx.stroke();
+        ctx.restore();
+        ctx.fillStyle = '#555'; ctx.font = '8px monospace';
+        ctx.fillText('note off', noteOffX + 3, margin + 10);
+
+        // Segment labels
+        ctx.fillStyle = '#555'; ctx.font = '9px monospace';
+        const segX = [margin, d1StartX, d2StartX, noteOffX, relStartX + rrVisMs * scale];
+        const labels = ['AR', 'D1R', 'D2R', 'RR'];
+        for (let i = 0; i < 4; i++) {
+            const mx = (segX[i] + segX[i + 1]) / 2;
+            ctx.fillText(labels[i], mx - 8, h - 1);
+        }
+
+        // Time label
+        document.getElementById('env-time-label').textContent =
+            'AR=' + Math.round(arMs) + 'ms D1=' + Math.round(d1rMs) +
+            'ms D2=' + (op.d2r > 0 ? Math.round(d2rMs) + 'ms' : 'off') +
+            ' RR=' + Math.round(rrMs) + 'ms';
+    }
+}
+
+// --- Waveform preview ---
+
+function drawWaveformPreview() {
+    const canvas = document.getElementById('wave-canvas');
+    if (!canvas) return;
+    const inst = state.instruments[selectedInst];
+    if (!inst || !inst.operators.length) return;
+    const op = inst.operators[selectedOp];
+    if (!op) return;
+
+    const rect = canvas.parentElement.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = rect.width * dpr;
+    const ch = rect.height - 60; // leave room for controls
+    canvas.height = Math.max(ch, 40) * dpr;
+    canvas.style.height = Math.max(ch, 40) + 'px';
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+    const w = rect.width, h = Math.max(ch, 40);
+    ctx.fillStyle = '#12122a'; ctx.fillRect(0, 0, w, h);
+
+    let samples;
+    const customKey = selectedInst + '_' + selectedOp;
+    if (customWaves[customKey]) {
+        samples = customWaves[customKey];
+    } else if (op.useTonSA && op.rawRegs && scsp) {
+        // Read PCM directly from SCSP RAM (16-bit LE after byte-swap on load)
+        const sa = ((op.rawRegs.d0 & 0x0F) << 16) | op.rawRegs.sa;
+        const lea = op.rawRegs.lea || op.loop_end || WAVE_LEN;
+        const numSamples = Math.max(lea, 64);
+        const ramPtr = scsp._scsp_get_ram_ptr();
+        samples = new Float32Array(numSamples);
+        for (let i = 0; i < numSamples; i++) {
+            const addr = ramPtr + (sa + i) * 2;
+            const s16 = scsp.HEAPU8[addr] | (scsp.HEAPU8[addr + 1] << 8);
+            samples[i] = ((s16 << 16) >> 16) / 32768; // sign-extend and normalize
+        }
+    } else {
+        samples = generateWaveform(op.waveform || 0, WAVE_LEN);
+    }
+    const n = samples.length;
+    const lsa = op.loop_start || 0;
+    const lea = op.loop_end || n;
+    const lm = op.loop_mode !== undefined ? op.loop_mode : 1;
+
+    // Loop region
+    if (lm > 0 && lea > lsa) {
+        const lx = lsa / n * w, ex = lea / n * w;
+        ctx.fillStyle = '#1a2a1a'; ctx.fillRect(lx, 0, ex - lx, h);
+        ctx.strokeStyle = '#44aa44'; ctx.setLineDash([2, 3]); ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(lx, 0); ctx.lineTo(lx, h); ctx.stroke();
+        ctx.strokeStyle = '#aa4444';
+        ctx.beginPath(); ctx.moveTo(ex, 0); ctx.lineTo(ex, h); ctx.stroke();
+        ctx.setLineDash([]);
+    }
+
+    // Waveform
+    ctx.strokeStyle = '#00d4ff'; ctx.lineWidth = 1; ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+        const x = i / n * w, y = h / 2 - samples[i] * (h / 2 - 4);
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+
+    // Center line
+    ctx.strokeStyle = '#333'; ctx.setLineDash([2, 4]); ctx.lineWidth = 0.5;
+    ctx.beginPath(); ctx.moveTo(0, h / 2); ctx.lineTo(w, h / 2); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Labels
+    ctx.fillStyle = '#555'; ctx.font = '9px monospace';
+    const isCustom = !!customWaves[customKey];
+    const isTonPCM = op.useTonSA && op.rawRegs;
+    const waveLabel = isCustom ? 'Custom (' + n + ' smp)' : isTonPCM ? 'PCM (' + n + ' smp)' : (WAVE_NAMES[op.waveform || 0] || '?');
+    ctx.fillText(waveLabel, 4, 12);
+    ctx.fillText(lm > 0 ? LOOP_NAMES[lm] + ' ' + lsa + '-' + lea : 'No loop', 4, h - 4);
+}
+
+function renderWaveControls() {
+    const el = document.getElementById('wave-controls');
+    el.innerHTML = '';
+    const inst = state.instruments[selectedInst];
+    if (!inst || !inst.operators.length) return;
+    const op = inst.operators[selectedOp];
+    if (!op) return;
+
+    // Loop mode
+    const lmLbl = document.createElement('label'); lmLbl.textContent = 'Loop:';
+    const lmSel = document.createElement('select');
+    LOOP_NAMES.forEach((name, i) => {
+        const o = document.createElement('option'); o.value = i; o.textContent = name;
+        if (i === (op.loop_mode !== undefined ? op.loop_mode : 1)) o.selected = true;
+        lmSel.appendChild(o);
+    });
+    lmSel.onchange = () => { op.loop_mode = parseInt(lmSel.value); syncRawRegs(op); liveUpdatePreview(); drawWaveformPreview(); };
+    el.appendChild(lmLbl); el.appendChild(lmSel);
+
+    // Determine actual waveform length
+    const customKey = selectedInst + '_' + selectedOp;
+    let waveLen = WAVE_LEN;
+    if (customWaves[customKey]) {
+        waveLen = customWaves[customKey].length;
+    } else if (op.useTonSA && op.rawRegs) {
+        waveLen = op.rawRegs.lea || op.loop_end || WAVE_LEN;
+    } else {
+        waveLen = (waveStore.waves[op.waveform || 0] || {}).length || WAVE_LEN;
+    }
+
+    // Loop start
+    const lsLbl = document.createElement('label'); lsLbl.textContent = 'Start:';
+    const lsInp = document.createElement('input'); lsInp.type = 'range'; lsInp.min = 0; lsInp.max = waveLen; lsInp.step = 1;
+    lsInp.value = op.loop_start || 0;
+    lsInp.oninput = () => { op.loop_start = parseInt(lsInp.value); syncRawRegs(op); liveUpdatePreview(); drawWaveformPreview(); };
+    el.appendChild(lsLbl); el.appendChild(lsInp);
+
+    // Loop end
+    const leLbl = document.createElement('label'); leLbl.textContent = 'End:';
+    const leInp = document.createElement('input'); leInp.type = 'range'; leInp.min = 0; leInp.max = waveLen; leInp.step = 1;
+    leInp.value = op.loop_end || waveLen;
+    leInp.oninput = () => { op.loop_end = parseInt(leInp.value); syncRawRegs(op); liveUpdatePreview(); drawWaveformPreview(); };
+    el.appendChild(leLbl); el.appendChild(leInp);
+}
+
+// --- Routing graph ---
+
+function drawRouting() {
+    const container = document.getElementById('op-graph-mini');
+    const svg = document.getElementById('routing-svg');
+    container.innerHTML = ''; svg.innerHTML = '';
+
+    const inst = state.instruments[selectedInst];
+    if (!inst) return;
+
+    inst.operators.forEach((op, i) => {
+        const box = document.createElement('div');
+        box.className = 'op-box-mini' + (i === selectedOp ? ' sel' : '') + (op.is_carrier ? ' carrier' : '');
+        box.innerHTML = '<div class="op-name">Op' + (i + 1) + '</div>' +
+            '<div class="op-role ' + (op.is_carrier ? 'car' : 'mod') + '">' +
+            (op.is_carrier ? 'C' : 'M') + '</div>';
+        box.onclick = () => { selectedOp = i; renderInstEditor(); refreshInstDetail(); };
+        container.appendChild(box);
+    });
+
+    // Draw arrows after layout settles
+    requestAnimationFrame(() => {
+        svg.innerHTML = '';
+        const boxes = container.querySelectorAll('.op-box-mini');
+        const secRect = document.getElementById('routing-section').getBoundingClientRect();
+
+        inst.operators.forEach((op, i) => {
+            if (op.mod_source >= 0 && op.mod_source < boxes.length && i < boxes.length) {
+                const sr = boxes[op.mod_source].getBoundingClientRect();
+                const dr = boxes[i].getBoundingClientRect();
+                const x1 = sr.left + sr.width / 2 - secRect.left;
+                const y1 = sr.top + sr.height / 2 - secRect.top;
+                const x2 = dr.left + dr.width / 2 - secRect.left;
+                const y2 = dr.top + dr.height / 2 - secRect.top;
+
+                const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+                line.setAttribute('x1', x1); line.setAttribute('y1', y1);
+                line.setAttribute('x2', x2); line.setAttribute('y2', y2);
+                line.setAttribute('stroke', '#a84'); line.setAttribute('stroke-width', '2');
+                line.setAttribute('stroke-dasharray', '4,3');
+                svg.appendChild(line);
+
+                const angle = Math.atan2(y2 - y1, x2 - x1);
+                const headLen = 8;
+                const cx = (x1 + x2) / 2, cy = (y1 + y2) / 2;
+                const poly = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+                const p1x = cx + headLen * Math.cos(angle);
+                const p1y = cy + headLen * Math.sin(angle);
+                const p2x = cx - headLen * Math.cos(angle - 0.5);
+                const p2y = cy - headLen * Math.sin(angle - 0.5);
+                const p3x = cx - headLen * Math.cos(angle + 0.5);
+                const p3y = cy - headLen * Math.sin(angle + 0.5);
+                poly.setAttribute('points', `${p1x},${p1y} ${p2x},${p2y} ${p3x},${p3y}`);
+                poly.setAttribute('fill', '#a84');
+                svg.appendChild(poly);
+            }
+
+            // Self-feedback arc
+            if (op.feedback > 0 && i < boxes.length) {
+                const br = boxes[i].getBoundingClientRect();
+                const cx = br.left + br.width / 2 - secRect.left;
+                const cy = br.top - secRect.top;
+                const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                path.setAttribute('d', `M ${cx-10},${cy} C ${cx-15},${cy-20} ${cx+15},${cy-20} ${cx+10},${cy}`);
+                path.setAttribute('stroke', '#866'); path.setAttribute('stroke-width', '1.5');
+                path.setAttribute('fill', 'none'); path.setAttribute('stroke-dasharray', '3,2');
+                svg.appendChild(path);
+            }
+        });
+    });
+}
+
+// --- WAV import ---
+
+function parseWav(buf) {
+    const v = new DataView(buf);
+    const tag = (o) => String.fromCharCode(v.getUint8(o), v.getUint8(o+1), v.getUint8(o+2), v.getUint8(o+3));
+    if (tag(0) !== 'RIFF' || tag(8) !== 'WAVE') throw new Error('Not a WAV file');
+    let fmt = null, dOff = 0, dSize = 0, pos = 12;
+    while (pos < v.byteLength - 8) {
+        const id = tag(pos), sz = v.getUint32(pos + 4, true);
+        if (id === 'fmt ') fmt = { ch: v.getUint16(pos+10, true), sr: v.getUint32(pos+12, true), bits: v.getUint16(pos+22, true) };
+        else if (id === 'data') { dOff = pos + 8; dSize = sz; }
+        pos += 8 + sz; if (pos % 2) pos++;
+    }
+    if (!fmt || !dOff) throw new Error('Invalid WAV');
+    const bps = fmt.bits / 8, nf = Math.floor(dSize / (bps * fmt.ch));
+    const out = new Float32Array(nf);
+    for (let i = 0; i < nf; i++) {
+        const o = dOff + i * bps * fmt.ch;
+        out[i] = fmt.bits === 16 ? v.getInt16(o, true) / 32768 : fmt.bits === 8 ? (v.getUint8(o) - 128) / 128 : 0;
+    }
+    return { samples: out };
+}
+
+function resampleTo(input, targetLen) {
+    const out = new Float32Array(targetLen);
+    const ratio = input.length / targetLen;
+    for (let i = 0; i < targetLen; i++) {
+        const si = i * ratio, idx = Math.floor(si), fr = si - idx;
+        out[i] = input[Math.min(idx, input.length - 1)] * (1 - fr) + input[Math.min(idx + 1, input.length - 1)] * fr;
+    }
+    return out;
+}
+
+function loadWavForOp() {
+    const input = document.createElement('input');
+    input.type = 'file'; input.accept = '.wav,audio/wav';
+    input.onchange = async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = async (ev) => {
+            try {
+                await initSCSP();
+                const result = parseWav(ev.target.result);
+                const inst = state.instruments[selectedInst];
+                const op = inst.operators[selectedOp];
+
+                let samples = result.samples;
+                if (samples.length !== WAVE_LEN) {
+                    samples = resampleTo(samples, WAVE_LEN);
+                }
+
+                const ramPtr = scsp._scsp_get_ram_ptr();
+                const wid = waveStoreAdd(ramPtr, samples, 0, samples.length, 1);
+                op.waveform = wid;
+                op.loop_start = 0;
+                op.loop_end = samples.length;
+                op.loop_mode = 1;
+                customWaves[selectedInst + '_' + selectedOp] = samples;
+                syncRawRegs(op);
+                refreshInstDetail();
+                renderInstEditor();
+            } catch (err) { alert('WAV error: ' + err.message); }
+        };
+        reader.readAsArrayBuffer(file);
+    };
+    input.click();
+}
+
+// Hook into sidebar param changes to update detail panel
+const _origSyncRawRegs = syncRawRegs;
+syncRawRegs = function(op) {
+    _origSyncRawRegs(op);
+    refreshInstDetail();
+};
 
 // ═══════════════════════════════════════════════════════════════
 // MIDI IMPORT
