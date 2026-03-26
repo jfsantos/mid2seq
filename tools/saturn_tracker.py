@@ -1941,16 +1941,27 @@ function drawWaveformPreview() {
     if (customWaves[customKey]) {
         samples = customWaves[customKey];
     } else if (op.useTonSA && op.rawRegs && scsp) {
-        // Read PCM directly from SCSP RAM (16-bit LE after byte-swap on load)
+        // Read PCM directly from SCSP RAM (byte-swapped on load)
         const sa = ((op.rawRegs.d0 & 0x0F) << 16) | op.rawRegs.sa;
-        const lea = op.rawRegs.lea || op.loop_end || WAVE_LEN;
-        const numSamples = Math.max(lea, 64);
+        const numSamples = Math.max(op.rawRegs.lea || op.loop_end || WAVE_LEN, 64);
         const ramPtr = scsp._scsp_get_ram_ptr();
         samples = new Float32Array(numSamples);
-        for (let i = 0; i < numSamples; i++) {
-            const addr = ramPtr + (sa + i) * 2;
-            const s16 = scsp.HEAPU8[addr] | (scsp.HEAPU8[addr + 1] << 8);
-            samples[i] = ((s16 << 16) >> 16) / 32768; // sign-extend and normalize
+        if (op.pcm8b) {
+            // 8-bit PCM: 1 byte per sample, byte-swapped pairs
+            for (let i = 0; i < numSamples; i++) {
+                const addr = ramPtr + sa + i;
+                // Byte-swap was applied to pairs, so odd/even bytes are swapped
+                const swapped = (i & 1) ? addr - 1 : addr + 1;
+                const s8 = scsp.HEAPU8[swapped];
+                samples[i] = ((s8 << 24) >> 24) / 128; // sign-extend and normalize
+            }
+        } else {
+            // 16-bit PCM: 2 bytes per sample (LE after byte-swap)
+            for (let i = 0; i < numSamples; i++) {
+                const addr = ramPtr + sa + i * 2;
+                const s16 = scsp.HEAPU8[addr] | (scsp.HEAPU8[addr + 1] << 8);
+                samples[i] = ((s16 << 16) >> 16) / 32768;
+            }
         }
     } else {
         samples = generateWaveform(op.waveform || 0, WAVE_LEN);
@@ -1988,7 +1999,7 @@ function drawWaveformPreview() {
     ctx.fillStyle = '#555'; ctx.font = '9px monospace';
     const isCustom = !!customWaves[customKey];
     const isTonPCM = op.useTonSA && op.rawRegs;
-    const waveLabel = isCustom ? 'Custom (' + n + ' smp)' : isTonPCM ? 'PCM (' + n + ' smp)' : (WAVE_NAMES[op.waveform || 0] || '?');
+    const waveLabel = isCustom ? 'Custom (' + n + ' smp)' : isTonPCM ? 'PCM ' + (op.pcm8b ? '8-bit' : '16-bit') + ' (' + n + ' smp)' : (WAVE_NAMES[op.waveform || 0] || '?');
     ctx.fillText(waveLabel, 4, 12);
     ctx.fillText(lm > 0 ? LOOP_NAMES[lm] + ' ' + lsa + '-' + lea : 'No loop', 4, h - 4);
 }
@@ -2715,6 +2726,7 @@ function loadTonData(arrayBuffer, label) {
                     feedback: o.feedback || 0, is_carrier: o.is_carrier !== undefined ? o.is_carrier : true,
                     waveform: 0, loop_mode: o.loop_mode !== undefined ? o.loop_mode : 1,
                     loop_start: o.loop_start || 0, loop_end: o.loop_end || 1024,
+                    pcm8b: o.pcm8b || false,
                     rawRegs: o.rawRegs || null,
                     // Flag: PCM is at original SA in SCSP RAM, don't use waveStore
                     useTonSA: true,

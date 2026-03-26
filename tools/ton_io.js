@@ -422,6 +422,7 @@ const TonIO = (function () {
           loop_mode: lpctl,
           loop_start: lsa,
           loop_end: lea,
+          pcm8b: pcm8b ? true : false,
           pcm: pcm,
           rawRegs: rawRegs, // raw SCSP register data for direct slot programming
         });
