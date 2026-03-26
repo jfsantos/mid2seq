@@ -46,9 +46,29 @@ def generate_html():
     else:
         ton_io_js = "var TonIO = null;"
 
+    # Embed demo MIDI and example TON files
+    demo_midi_b64 = ""
+    demo_midi_path = os.path.join(os.path.dirname(__file__), '..', 'examples', 'kit_demo.mid')
+    if os.path.exists(demo_midi_path):
+        with open(demo_midi_path, 'rb') as f:
+            demo_midi_b64 = base64.b64encode(f.read()).decode('ascii')
+
+    example_tons = {}
+    ton_dir = os.path.join(os.path.dirname(__file__), '..', 'test_ton')
+    if os.path.isdir(ton_dir):
+        for fn in sorted(os.listdir(ton_dir)):
+            if fn.upper().endswith('.TON'):
+                with open(os.path.join(ton_dir, fn), 'rb') as f:
+                    example_tons[fn] = base64.b64encode(f.read()).decode('ascii')
+
+    import json
+    tons_json = json.dumps(example_tons)
+
     html = _HTML_TEMPLATE.replace('__SCSP_WASM_B64__', wasm_b64)
     html = html.replace('__SCSP_GLUE_JS__', glue_js)
     html = html.replace('__TON_IO_JS__', ton_io_js)
+    html = html.replace('__DEMO_MIDI_B64__', demo_midi_b64)
+    html = html.replace('__EXAMPLE_TONS_JSON__', tons_json)
     return html
 
 
@@ -85,6 +105,13 @@ body { font-family: 'SF Mono', Consolas, Monaco, monospace; background: #0a0a1a;
 .ch-hdr select { background: #1a1a2e; color: #aaa; border: 1px solid #333; padding: 1px 2px;
                   font-family: inherit; font-size: 9px; border-radius: 2px; flex: 1; }
 .ch-hdr span { color: #00d4ff; font-weight: bold; }
+.ch-btn { padding: 1px 4px; border: 1px solid #444; border-radius: 2px; cursor: pointer;
+          font-family: inherit; font-size: 8px; background: #1a1a2e; color: #666; }
+.ch-btn:hover { background: #2a2a4e; }
+.ch-btn.muted { background: #4a2a2a; color: #f88; border-color: #f44; }
+.ch-btn.solo { background: #2a4a2a; color: #8f8; border-color: #4f4; }
+.ch-hdr.muted { opacity: 0.4; }
+.cell.ch-muted { opacity: 0.3; }
 
 /* Pattern grid */
 #grid-container { flex: 1; overflow-y: auto; overflow-x: auto; }
@@ -103,6 +130,7 @@ body { font-family: 'SF Mono', Consolas, Monaco, monospace; background: #0a0a1a;
 .cell .note.off { color: #f66; }
 .cell .inst { color: #8a8; margin-left: 4px; }
 .cell .vol { color: #aa8; margin-left: 4px; }
+.cell .col-cursor { background: #00d4ff33; border-radius: 2px; padding: 0 1px; }
 .cell.has-note { color: #ccc; }
 
 /* Status bar */
@@ -197,7 +225,13 @@ body { font-family: 'SF Mono', Consolas, Monaco, monospace; background: #0a0a1a;
   <button onclick="exportSEQ()">Export SEQ</button>
   <span class="transport-sep">|</span>
   <button onclick="importMIDI()">Import MIDI</button>
-  <button onclick="importTonForTracker()">Load Instruments (TON)</button>
+  <div class="transport-group">
+    <label>Instruments:</label>
+    <select id="ton-select" onchange="onTonSelect(this.value)">
+      <option value="">-- Select TON --</option>
+    </select>
+    <button onclick="importTonForTracker()">Browse...</button>
+  </div>
 </div>
 
 <!-- Song arrangement -->
@@ -268,6 +302,7 @@ const NUM_CHANNELS = 8;
 
 let scsp = null, scspReady = false;
 let actx = null, fmNode = null, fmGain = null;
+let scspLocked = false; // prevents audio callback from using SCSP during reset/load
 
 // ── Waveform generators ──
 function genAdditive(n, harmonics) {
@@ -303,6 +338,12 @@ const waveStore = { waves: [], nextOffset: 0 };
 function waveStoreAdd(ramPtr, floatSamples, loopStart, loopEnd, loopMode) {
     const offset = waveStore.nextOffset;
     const len = floatSamples.length;
+    const byteSize = len * 2;
+    // Bounds check: never write past 512KB SCSP RAM
+    if (offset + byteSize > 512 * 1024) {
+        console.warn('waveStoreAdd: skipping, would exceed 512KB RAM (' + offset + '+' + byteSize + ')');
+        return 0; // fall back to sine (waveform 0)
+    }
     for (let i = 0; i < len; i++) {
         const val = Math.round(floatSamples[i] * 32767);
         scsp.HEAPU8[ramPtr + offset + i * 2]     = val & 0xFF;
@@ -310,7 +351,7 @@ function waveStoreAdd(ramPtr, floatSamples, loopStart, loopEnd, loopMode) {
     }
     const id = waveStore.waves.length;
     waveStore.waves.push({ offset, length: len, loopStart, loopEnd, loopMode });
-    waveStore.nextOffset = offset + len * 2;
+    waveStore.nextOffset = offset + byteSize;
     return id;
 }
 
@@ -460,7 +501,7 @@ function programSlot(slot, op, midiNote, allOps) {
  * slotBase: first slot number of this instrument (for FM ring buffer offset fixup)
  * opIndex: index of this operator within the instrument
  */
-function programSlotRaw(slot, rawRegs, midiNote, sa, slotBase, opIndex) {
+function programSlotRaw(slot, rawRegs, midiNote, sa, slotBase, opIndex, wavLen) {
     // Compute pitch from base_note — the MIDI note where this layer
     // plays at its natural pitch at OCT=0, FNS=0.
     // base_note accounts for both waveform length and freq_ratio.
@@ -472,6 +513,10 @@ function programSlotRaw(slot, rawRegs, midiNote, sa, slotBase, opIndex) {
 
     // SA: use the provided waveform address with original LPCTL
     const d0 = (rawRegs.d0 & 0xE0) | ((sa >> 16) & 0xF);
+
+    // Clamp LSA/LEA to actual waveform length to prevent reading adjacent RAM
+    const lsa = Math.min(rawRegs.lsa, wavLen);
+    const lea = Math.min(rawRegs.lea, wavLen);
 
     // Fix up MDXSL/MDYSL for the actual slot layout.
     // The TON stores ring buffer offsets relative to the original layer indices.
@@ -497,16 +542,16 @@ function programSlotRaw(slot, rawRegs, midiNote, sa, slotBase, opIndex) {
 
     scsp._scsp_write_slot(slot, 0x0, d0);
     scsp._scsp_write_slot(slot, 0x1, sa & 0xFFFF);
-    scsp._scsp_write_slot(slot, 0x2, rawRegs.lsa);
-    scsp._scsp_write_slot(slot, 0x3, rawRegs.lea);
-    scsp._scsp_write_slot(slot, 0x4, rawRegs.d4);      // D2R|D1R|AR
-    scsp._scsp_write_slot(slot, 0x5, rawRegs.d5);      // KRS|DL|RR
-    scsp._scsp_write_slot(slot, 0x6, rawRegs.tl);      // TL — exact value, no recomputation
-    scsp._scsp_write_slot(slot, 0x7, d7);               // MDL|MDXSL|MDYSL
-    scsp._scsp_write_slot(slot, 0x8, octBits);          // OCT|FNS
+    scsp._scsp_write_slot(slot, 0x2, lsa);              // clamped to waveform length
+    scsp._scsp_write_slot(slot, 0x3, lea);              // clamped to waveform length
+    scsp._scsp_write_slot(slot, 0x4, rawRegs.d4);
+    scsp._scsp_write_slot(slot, 0x5, rawRegs.d5);
+    scsp._scsp_write_slot(slot, 0x6, rawRegs.tl);
+    scsp._scsp_write_slot(slot, 0x7, d7);
+    scsp._scsp_write_slot(slot, 0x8, octBits);
     scsp._scsp_write_slot(slot, 0x9, 0);
     scsp._scsp_write_slot(slot, 0xA, 0);
-    scsp._scsp_write_slot(slot, 0xB, rawRegs.dB >> 8);  // DISDL|DIPAN
+    scsp._scsp_write_slot(slot, 0xB, rawRegs.dB & 0xFF00); // DISDL|DIPAN in bits 15:8
 }
 
 function ensureAudio() {
@@ -608,6 +653,46 @@ const state = {
     cursor: { row: 0, ch: 0, col: 0 }, // col: 0=note, 1=inst, 2=vol
 };
 
+// Channel mute/solo state (separate from pattern data so it doesn't affect export)
+const channelState = new Array(NUM_CHANNELS).fill('on'); // 'on', 'muted', 'solo'
+
+function isChannelAudible(ch) {
+    const hasSolo = channelState.indexOf('solo') >= 0;
+    if (hasSolo) return channelState[ch] === 'solo';
+    return channelState[ch] !== 'muted';
+}
+
+function toggleMute(ch) {
+    if (channelState[ch] === 'muted') {
+        channelState[ch] = 'on';
+    } else {
+        if (channelState[ch] === 'solo') channelState[ch] = 'on'; // unsolo first
+        channelState[ch] = 'muted';
+    }
+    // Release any playing notes on muted channel
+    if (!isChannelAudible(ch)) voiceAlloc.release(ch);
+    renderChannelHeaders();
+    renderGrid();
+}
+
+function toggleSolo(ch) {
+    if (channelState[ch] === 'solo') {
+        channelState[ch] = 'on';
+    } else {
+        // Unsolo any other channel
+        for (let i = 0; i < NUM_CHANNELS; i++) {
+            if (channelState[i] === 'solo') channelState[i] = 'on';
+        }
+        channelState[ch] = 'solo';
+    }
+    // Release notes on now-inaudible channels
+    for (let i = 0; i < NUM_CHANNELS; i++) {
+        if (!isChannelAudible(i)) voiceAlloc.release(i);
+    }
+    renderChannelHeaders();
+    renderGrid();
+}
+
 function createEmptyPattern(len) {
     const channels = [];
     for (let c = 0; c < NUM_CHANNELS; c++) {
@@ -692,18 +777,22 @@ const playback = {
     currentSongSlot: 0,
     samplePos: 0,
     samplesPerStep: 0,
+    // Pending note-offs: array of { songSlot, row, ch } — release at this position
+    pendingOffs: [],
 
     start() {
         this.playing = true;
         this.currentRow = state.cursor.row;
         this.currentSongSlot = currentSongSlot;
         this.samplePos = 0;
+        this.pendingOffs = [];
         this.updateTempo();
         document.getElementById('btn-play').classList.add('active');
     },
 
     stop() {
         this.playing = false;
+        this.pendingOffs = [];
         voiceAlloc.releaseAll();
         document.getElementById('btn-play').classList.remove('active');
         renderGrid();
@@ -742,13 +831,36 @@ const playback = {
     },
 
     triggerRow(row, pat) {
+        // Process pending note-offs that expire at this position
+        const curPos = this.currentSongSlot * 10000 + row; // unique position
+        this.pendingOffs = this.pendingOffs.filter(off => {
+            if (off.pos <= curPos) {
+                voiceAlloc.release(off.ch);
+                return false;
+            }
+            return true;
+        });
+
         for (let ch = 0; ch < NUM_CHANNELS; ch++) {
+            if (!isChannelAudible(ch)) continue;
             const cell = pat.channels[ch].rows[row];
             if (cell.note === -1) {
                 voiceAlloc.release(ch);
             } else if (cell.note !== null) {
                 const instIdx = cell.inst !== null ? cell.inst : pat.channels[ch].defaultInst;
+                voiceAlloc.release(ch); // release previous note first
                 triggerNote(ch, cell.note, instIdx);
+
+                // Schedule note-off: find next note on this channel or end of pattern
+                let gateRows = pat.length - row;
+                for (let r = row + 1; r < pat.length; r++) {
+                    if (pat.channels[ch].rows[r].note !== null) {
+                        gateRows = r - row;
+                        break;
+                    }
+                }
+                const offPos = this.currentSongSlot * 10000 + row + gateRows;
+                this.pendingOffs.push({ pos: offPos, ch: ch });
             }
         }
     }
@@ -760,16 +872,23 @@ const playback = {
 
 function triggerNote(ch, midiNote, instIdx) {
     const inst = state.instruments[instIdx];
-    if (!inst) return;
+    if (!inst) { console.warn('[triggerNote] no inst at', instIdx); return; }
     const ops = inst.operators;
     const slots = voiceAlloc.allocate(ch, midiNote, ops.length);
     const slotBase = slots[0];
     for (let i = 0; i < ops.length; i++) {
         const op = ops[i];
         if (op.rawRegs) {
-            // Imported from TON — use raw registers for exact Saturn playback
-            const wav = waveStore.waves[op.waveform || 0] || waveStore.waves[0];
-            programSlotRaw(slots[i], op.rawRegs, midiNote, wav.offset, slotBase, i);
+            if (op.useTonSA) {
+                // TON loaded via bulk copy — SA is already correct in SCSP RAM.
+                const origSA = ((op.rawRegs.d0 & 0x0F) << 16) | op.rawRegs.sa;
+                if (i === 0 && ch === 0) console.log('[triggerNote] slot=' + slots[i] + ' SA=0x' + origSA.toString(16) + ' LEA=' + op.rawRegs.lea + ' note=' + midiNote + ' baseNote=' + op.rawRegs.baseNote);
+                programSlotRaw(slots[i], op.rawRegs, midiNote, origSA, slotBase, i, op.rawRegs.lea);
+            } else {
+                // Imported from TON with individual waveform loading
+                const wav = waveStore.waves[op.waveform || 0] || waveStore.waves[0];
+                programSlotRaw(slots[i], op.rawRegs, midiNote, wav.offset, slotBase, i, wav.length);
+            }
         } else {
             // Built-in preset — use computed programSlot
             programSlot(slots[i], op, midiNote, ops);
@@ -808,8 +927,23 @@ function renderChannelHeaders() {
     const pat = getCurrentPattern();
     for (let ch = 0; ch < NUM_CHANNELS; ch++) {
         const div = document.createElement('div');
-        div.className = 'ch-hdr';
+        div.className = 'ch-hdr' + (channelState[ch] === 'muted' || (!isChannelAudible(ch) && channelState[ch] !== 'solo') ? ' muted' : '');
         div.innerHTML = '<span>CH' + (ch + 1) + '</span>';
+
+        const muteBtn = document.createElement('button');
+        muteBtn.className = 'ch-btn' + (channelState[ch] === 'muted' ? ' muted' : '');
+        muteBtn.textContent = 'M';
+        muteBtn.title = 'Mute';
+        muteBtn.onclick = ((c) => () => toggleMute(c))(ch);
+        div.appendChild(muteBtn);
+
+        const soloBtn = document.createElement('button');
+        soloBtn.className = 'ch-btn' + (channelState[ch] === 'solo' ? ' solo' : '');
+        soloBtn.textContent = 'S';
+        soloBtn.title = 'Solo';
+        soloBtn.onclick = ((c) => () => toggleSolo(c))(ch);
+        div.appendChild(soloBtn);
+
         const sel = document.createElement('select');
         state.instruments.forEach((inst, i) => {
             const opt = document.createElement('option');
@@ -848,6 +982,7 @@ function renderGrid() {
             cellDiv.className = 'cell';
             if (state.cursor.row === r && state.cursor.ch === ch) cellDiv.classList.add('cursor');
             if (cell.note !== null) cellDiv.classList.add('has-note');
+            if (!isChannelAudible(ch)) cellDiv.classList.add('ch-muted');
             cellDiv.dataset.row = r;
             cellDiv.dataset.ch = ch;
 
@@ -859,9 +994,13 @@ function renderGrid() {
             const instStr = cell.inst !== null ? cell.inst.toString(16).toUpperCase().padStart(2, '0') : '..';
             const volStr = cell.vol !== null ? cell.vol.toString(16).toUpperCase().padStart(2, '0') : '..';
 
-            cellDiv.innerHTML = '<span class="' + noteClass + '">' + noteStr + '</span>' +
-                                '<span class="inst">' + instStr + '</span>' +
-                                '<span class="vol">' + volStr + '</span>';
+            const isCursor = state.cursor.row === r && state.cursor.ch === ch;
+            const nc = isCursor && state.cursor.col === 0 ? ' col-cursor' : '';
+            const ic = isCursor && state.cursor.col === 1 ? ' col-cursor' : '';
+            const vc = isCursor && state.cursor.col === 2 ? ' col-cursor' : '';
+            cellDiv.innerHTML = '<span class="' + noteClass + nc + '">' + noteStr + '</span>' +
+                                '<span class="inst' + ic + '">' + instStr + '</span>' +
+                                '<span class="vol' + vc + '">' + volStr + '</span>';
 
             cellDiv.onclick = () => {
                 state.cursor.row = r;
@@ -904,7 +1043,8 @@ function updatePlaybackCursor() {
 }
 
 function updateStatusBar() {
-    document.getElementById('status-pos').textContent = 'Row: ' + state.cursor.row.toString(16).toUpperCase().padStart(2, '0');
+    const colNames = ['Note', 'Inst', 'Vol'];
+    document.getElementById('status-pos').textContent = 'Row: ' + state.cursor.row.toString(16).toUpperCase().padStart(2, '0') + ' [' + colNames[state.cursor.col] + ']';
     const pat = getCurrentPattern();
     const instIdx = pat.channels[state.cursor.ch].defaultInst;
     document.getElementById('status-inst').textContent = 'Inst: ' + instIdx.toString(16).toUpperCase().padStart(2, '0') + ' ' + (state.instruments[instIdx] || {}).name;
@@ -933,12 +1073,22 @@ document.addEventListener('keydown', async (e) => {
         return;
     }
 
-    // Navigation
+    // Navigation — Left/Right cycles: note → inst → vol → next channel
     if (e.key === 'ArrowDown') { e.preventDefault(); cur.row = Math.min(cur.row + 1, pat.length - 1); renderGrid(); return; }
     if (e.key === 'ArrowUp') { e.preventDefault(); cur.row = Math.max(cur.row - 1, 0); renderGrid(); return; }
-    if (e.key === 'ArrowRight') { e.preventDefault(); cur.ch = Math.min(cur.ch + 1, NUM_CHANNELS - 1); renderGrid(); return; }
-    if (e.key === 'ArrowLeft') { e.preventDefault(); cur.ch = Math.max(cur.ch - 1, 0); renderGrid(); return; }
-    if (e.key === 'Tab') { e.preventDefault(); cur.ch = (cur.ch + (e.shiftKey ? -1 : 1) + NUM_CHANNELS) % NUM_CHANNELS; renderGrid(); return; }
+    if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        cur.col++;
+        if (cur.col > 2) { cur.col = 0; cur.ch = Math.min(cur.ch + 1, NUM_CHANNELS - 1); }
+        renderGrid(); return;
+    }
+    if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        cur.col--;
+        if (cur.col < 0) { cur.col = 2; cur.ch = Math.max(cur.ch - 1, 0); }
+        renderGrid(); return;
+    }
+    if (e.key === 'Tab') { e.preventDefault(); cur.ch = (cur.ch + (e.shiftKey ? -1 : 1) + NUM_CHANNELS) % NUM_CHANNELS; cur.col = 0; renderGrid(); return; }
 
     // Delete = clear cell
     if (e.key === 'Delete' || e.key === 'Backspace') {
@@ -947,6 +1097,27 @@ document.addEventListener('keydown', async (e) => {
         if (e.key === 'Backspace' && cur.row > 0) cur.row--;
         renderGrid();
         return;
+    }
+
+    // Hex digit input for instrument (col=1) and volume (col=2) columns
+    if (cur.col === 1 || cur.col === 2) {
+        const hexDigit = '0123456789abcdef'.indexOf(e.key.toLowerCase());
+        if (hexDigit >= 0) {
+            e.preventDefault();
+            const cell = pat.channels[cur.ch].rows[cur.row];
+            if (cur.col === 1) {
+                // Instrument: two hex digits, shift left and add
+                const prev = cell.inst !== null ? cell.inst : 0;
+                cell.inst = ((prev & 0x0F) << 4) | hexDigit;
+                if (cell.inst >= state.instruments.length) cell.inst = state.instruments.length - 1;
+            } else {
+                // Volume: two hex digits, shift left and add (0x00-0x7F)
+                const prev = cell.vol !== null ? cell.vol : 0;
+                cell.vol = Math.min(127, ((prev & 0x0F) << 4) | hexDigit);
+            }
+            renderGrid();
+            return;
+        }
     }
 
     // Note off (period key or backtick)
@@ -1165,31 +1336,7 @@ async function importTonInst() {
         const reader = new FileReader();
         reader.onload = (ev) => {
             try {
-                resetSCSP(); // Clear old waveforms before adding new ones
-                const result = TonIO.importTon(ev.target.result);
-                const ramPtr = scsp._scsp_get_ram_ptr();
-                for (const p of result.patches) {
-                    state.instruments.push({
-                        name: p.name || 'TON ' + state.instruments.length,
-                        operators: p.operators.map(o => {
-                            let waveId = 0;
-                            if (o.pcm && o.pcm.length > 0) {
-                                waveId = waveStoreAdd(ramPtr, o.pcm, 0, o.pcm.length, o.loop_mode || 1);
-                            }
-                            return {
-                                freq_ratio: o.freq_ratio || 1, freq_fixed: 0,
-                                level: o.level !== undefined ? o.level : 0.8,
-                                ar: o.ar !== undefined ? o.ar : 31, d1r: o.d1r || 0, dl: o.dl || 0,
-                                d2r: o.d2r || 0, rr: o.rr !== undefined ? o.rr : 14,
-                                mdl: o.mdl || 0, mod_source: o.mod_source !== undefined ? o.mod_source : -1,
-                                feedback: o.feedback || 0, is_carrier: o.is_carrier !== undefined ? o.is_carrier : true,
-                                waveform: waveId, loop_mode: o.loop_mode !== undefined ? o.loop_mode : 1,
-                                loop_start: o.loop_start || 0, loop_end: o.pcm ? o.pcm.length : (o.loop_end || 1024),
-                            };
-                        })
-                    });
-                }
-                showStatus('Imported ' + result.patches.length + ' instruments from TON');
+                loadTonData(ev.target.result, file.name);
                 renderInstList(); renderChannelHeaders();
             } catch (err) { showStatus('TON error: ' + err.message); }
         };
@@ -1443,30 +1590,7 @@ async function importTonForTracker() {
         const reader = new FileReader();
         reader.onload = (ev) => {
             try {
-                resetSCSP(); // Clear all old waveforms and SCSP state
-                const result = TonIO.importTon(ev.target.result);
-                const ramPtr = scsp._scsp_get_ram_ptr();
-                state.instruments = result.patches.map((p, i) => ({
-                    name: p.name || ('Voice ' + i),
-                    operators: p.operators.map(o => {
-                        let waveId = 0;
-                        if (o.pcm && o.pcm.length > 0) {
-                            waveId = waveStoreAdd(ramPtr, o.pcm, 0, o.pcm.length, o.loop_mode || 1);
-                        }
-                        return {
-                            freq_ratio: o.freq_ratio || 1, freq_fixed: 0,
-                            level: o.level !== undefined ? o.level : 0.8,
-                            ar: o.ar !== undefined ? o.ar : 31, d1r: o.d1r || 0, dl: o.dl || 0,
-                            d2r: o.d2r || 0, rr: o.rr !== undefined ? o.rr : 14,
-                            mdl: o.mdl || 0, mod_source: o.mod_source !== undefined ? o.mod_source : -1,
-                            feedback: o.feedback || 0, is_carrier: o.is_carrier !== undefined ? o.is_carrier : true,
-                            waveform: waveId, loop_mode: o.loop_mode !== undefined ? o.loop_mode : 1,
-                            loop_start: o.loop_start || 0, loop_end: o.pcm ? o.pcm.length : (o.loop_end || 1024),
-                        };
-                    })
-                }));
-                showStatus('Loaded ' + state.instruments.length + ' instruments from ' + file.name);
-                renderAll();
+                loadTonData(ev.target.result, file.name);
             } catch (err) { showStatus('TON error: ' + err.message); }
         };
         reader.readAsArrayBuffer(file);
@@ -1486,12 +1610,14 @@ function midiToPatterns(midi) {
         document.getElementById('bpm').value = state.bpm;
     }
 
-    // Collect note-on events, sorted by time
+    // Collect note-on and note-off events
     const noteOns = midi.events.filter(e => e.type === 'on').sort((a, b) => a.absTime - b.absTime);
+    const noteOffs = midi.events.filter(e => e.type === 'off').sort((a, b) => a.absTime - b.absTime);
     if (noteOns.length === 0) { showStatus('No notes in MIDI'); return; }
 
-    // Find total length in steps
-    const lastTime = Math.max(...noteOns.map(e => e.absTime));
+    // Find total length in steps (include note-off times)
+    const allTimes = [...noteOns.map(e => e.absTime), ...noteOffs.map(e => e.absTime)];
+    const lastTime = Math.max(...allTimes);
     const totalSteps = Math.ceil(lastTime / ticksPerStep) + 1;
 
     // Split into patterns of patternLength
@@ -1513,7 +1639,7 @@ function midiToPatterns(midi) {
         state.song.push(p);
     }
 
-    // Place notes
+    // Place note-on events
     for (const ev of noteOns) {
         const trackerCh = chMap[ev.ch];
         if (trackerCh === undefined) continue;
@@ -1526,6 +1652,23 @@ function midiToPatterns(midi) {
         const cell = state.patterns[patIdx].channels[trackerCh].rows[row];
         cell.note = ev.note;
         cell.vol = ev.vel;
+    }
+
+    // Place note-off events (only where there isn't already a note-on at that position)
+    for (const ev of noteOffs) {
+        const trackerCh = chMap[ev.ch];
+        if (trackerCh === undefined) continue;
+
+        const globalStep = Math.round(ev.absTime / ticksPerStep);
+        const patIdx = Math.floor(globalStep / patLen);
+        const row = globalStep % patLen;
+
+        if (patIdx >= state.patterns.length) continue;
+        const cell = state.patterns[patIdx].channels[trackerCh].rows[row];
+        // Only place OFF if the cell doesn't already have a note-on
+        if (cell.note === null) {
+            cell.note = -1; // OFF marker
+        }
     }
 
     // Handle program changes — map to channel default instruments
@@ -1731,11 +1874,169 @@ function buildSEQ() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// EMBEDDED DEMO DATA
+// ═══════════════════════════════════════════════════════════════
+
+const DEMO_MIDI_B64 = '__DEMO_MIDI_B64__';
+const EXAMPLE_TONS = __EXAMPLE_TONS_JSON__;
+
+// ═══════════════════════════════════════════════════════════════
+// TON SELECTOR (dropdown with embedded examples + load from disk)
+// ═══════════════════════════════════════════════════════════════
+
+function buildTonSelector() {
+    const sel = document.getElementById('ton-select');
+    sel.innerHTML = '<option value="">-- Select TON --</option>';
+    // Add embedded example TON files
+    for (const name of Object.keys(EXAMPLE_TONS)) {
+        const opt = document.createElement('option');
+        opt.value = 'embedded:' + name;
+        opt.textContent = name;
+        sel.appendChild(opt);
+    }
+}
+
+const SCSP_RAM_SIZE = 512 * 1024; // 512KB
+
+async function onTonSelect(value) {
+    if (!value) return;
+    document.getElementById('ton-select').value = ''; // reset dropdown
+    if (value.startsWith('embedded:')) {
+        const name = value.slice(9);
+        const b64 = EXAMPLE_TONS[name];
+        if (!b64) return;
+        await initSCSP();
+        const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+        loadTonData(bin.buffer, name);
+    }
+}
+
+function loadTonData(arrayBuffer, label) {
+    try {
+        if (playback.playing) playback.stop();
+        scspReady = false;
+
+        // Copy the ENTIRE TON file directly into SCSP RAM — exactly like the
+        // Saturn sound driver does via DMA (see SaturnRingLib LoadSEQandTON).
+        // The TON file's internal SA pointers are already correct offsets within
+        // the file, so they become valid SCSP RAM addresses after the copy.
+        scsp._scsp_init();
+        voiceAlloc.releaseAll();
+        const ramPtr = scsp._scsp_get_ram_ptr();
+        const tonBytes = new Uint8Array(arrayBuffer);
+
+        if (tonBytes.length > SCSP_RAM_SIZE) {
+            showStatus(label + ' is ' + Math.round(tonBytes.length/1024) + 'KB — exceeds 512KB SCSP RAM');
+            scspReady = true;
+            return;
+        }
+
+        // Copy TON directly into SCSP RAM — no byte-swap needed.
+        // The TON file has big-endian PCM. The SCSP emulator expects LE.
+        // But waveStoreAdd was writing LE and that worked for small files.
+        // The issue with the old approach was duplicating shared PCM data
+        // (247KB TON → 3.8MB extracted). The bulk copy avoids that.
+        //
+        // We need to byte-swap PCM data (BE→LE) but NOT the header.
+        // However, the SCSP emulator only reads PCM from SCSPRAM, never headers.
+        // So we byte-swap the entire file — headers in RAM are never read by SCSP.
+        console.log('[loadTonData] ramPtr=' + ramPtr + ' tonSize=' + tonBytes.length + ' HEAPU8.length=' + scsp.HEAPU8.length);
+        if (ramPtr + tonBytes.length > scsp.HEAPU8.length) {
+            showStatus('TON too large for WASM heap (' + tonBytes.length + ' bytes, heap=' + scsp.HEAPU8.length + ')');
+            scspReady = true;
+            return;
+        }
+        for (let i = 0; i < tonBytes.length - 1; i += 2) {
+            scsp.HEAPU8[ramPtr + i]     = tonBytes[i + 1];
+            scsp.HEAPU8[ramPtr + i + 1] = tonBytes[i];
+        }
+        // Verify write: check first few bytes
+        console.log('[loadTonData] RAM[0..7]:', Array.from(scsp.HEAPU8.slice(ramPtr, ramPtr+8)).map(b => b.toString(16).padStart(2,'0')).join(' '));
+        console.log('[loadTonData] TON[0..7]:', Array.from(tonBytes.slice(0,8)).map(b => b.toString(16).padStart(2,'0')).join(' '));
+
+        // Parse the TON to extract instrument metadata (params + rawRegs).
+        // PCM data is already in SCSP RAM from the bulk copy above, so we
+        // DON'T re-extract or re-load PCM — we use the original SA addresses.
+        const result = TonIO.importTon(arrayBuffer);
+        state.instruments = [];
+
+        // Reset waveStore — we won't use it for TON instruments since PCM
+        // is already at the correct addresses in SCSP RAM.
+        waveStore.waves = [];
+        waveStore.nextOffset = 0;
+        // Load built-in waveforms AFTER the TON data (append to end of TON)
+        waveStore.nextOffset = tonBytes.length;
+        for (let t = 0; t < WAVE_NAMES.length; t++) {
+            const samples = generateWaveform(t, WAVE_LEN);
+            waveStoreAdd(ramPtr, samples, 0, WAVE_LEN, 1);
+        }
+
+        for (let i = 0; i < result.patches.length; i++) {
+            const p = result.patches[i];
+            state.instruments.push({
+                name: p.name || ('Voice ' + i),
+                operators: p.operators.map(o => ({
+                    freq_ratio: o.freq_ratio || 1, freq_fixed: 0,
+                    level: o.level !== undefined ? o.level : 0.8,
+                    ar: o.ar !== undefined ? o.ar : 31, d1r: o.d1r || 0, dl: o.dl || 0,
+                    d2r: o.d2r || 0, rr: o.rr !== undefined ? o.rr : 14,
+                    mdl: o.mdl || 0, mod_source: o.mod_source !== undefined ? o.mod_source : -1,
+                    feedback: o.feedback || 0, is_carrier: o.is_carrier !== undefined ? o.is_carrier : true,
+                    waveform: 0, loop_mode: o.loop_mode !== undefined ? o.loop_mode : 1,
+                    loop_start: o.loop_start || 0, loop_end: o.loop_end || 1024,
+                    rawRegs: o.rawRegs || null,
+                    // Flag: PCM is at original SA in SCSP RAM, don't use waveStore
+                    useTonSA: true,
+                }))
+            });
+        }
+
+        // Sanity check: play a quick note to verify SCSP is alive
+        scspReady = true;
+        if (state.instruments.length > 0) {
+            const testInst = state.instruments[0];
+            const testOps = testInst.operators;
+            if (testOps[0] && testOps[0].rawRegs) {
+                const r = testOps[0].rawRegs;
+                const sa = ((r.d0 & 0x0F) << 16) | r.sa;
+                console.log('[loadTonData] Test: inst0 SA=0x' + sa.toString(16) + ' LEA=' + r.lea + ' baseNote=' + r.baseNote);
+            }
+        }
+        showStatus('Loaded ' + state.instruments.length + ' instruments from ' + label + ' (' + Math.round(tonBytes.length/1024) + 'KB)');
+    } catch (err) {
+        console.error('TON load error:', err);
+        resetSCSP();
+        state.instruments = JSON.parse(JSON.stringify(PRESET_INSTRUMENTS));
+        scspReady = true;
+        showStatus('Error loading ' + label + ': ' + err.message + ' — reset to presets');
+    }
+    renderAll();
+}
+
+function loadDemoMidi() {
+    if (!DEMO_MIDI_B64) return;
+    try {
+        const bin = Uint8Array.from(atob(DEMO_MIDI_B64), c => c.charCodeAt(0));
+        const midi = parseMIDI(bin.buffer);
+        midiToPatterns(midi);
+        showStatus('Loaded demo song (' + state.patterns.length + ' patterns)');
+    } catch (err) {
+        console.error('Demo MIDI load error:', err);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════════════════════════════
 
+buildTonSelector();
 renderAll();
 updateTempo();
+
+// Auto-load demo MIDI on startup
+if (DEMO_MIDI_B64) {
+    loadDemoMidi();
+}
 
 </script>
 </body>

@@ -58,7 +58,9 @@ void scsp_init(void) {
 
     scsp_start(&intf);
 
-    /* Set master volume to max (MVOL=0xF) */
+    /* Write to slot 0 register 0 — this was in the original init code.
+     * While not MVOL (as originally commented), it may trigger necessary
+     * side effects in SCSP_UpdateSlotReg. Restoring for safety. */
     SCSP_0_w(0, 0x000F, 0x0000);
 }
 
