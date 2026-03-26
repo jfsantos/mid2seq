@@ -390,6 +390,23 @@ const TonIO = (function () {
           pcm[si] = val;
         }
 
+        // Store raw SCSP slot register words for direct playback (bypasses programSlot).
+        // These match the TON layer layout which maps directly to SCSP registers.
+        // The Saturn driver copies these directly — no recomputation.
+        var rawRegs = {
+          d0: (lpctl << 5) | ((saAddr >> 16) & 0xF), // LPCTL + SA high
+          sa: saAddr & 0xFFFF,                         // SA low
+          lsa: lsa,
+          lea: lea,
+          d4: (data[loff + 0x0A] << 8) | data[loff + 0x0B], // D2R|D1R|AR
+          d5: (data[loff + 0x0C] << 8) | data[loff + 0x0D], // KRS|DL|RR
+          tl: tl,
+          d7: (data[loff + 0x10] << 8) | data[loff + 0x11], // MDL|MDXSL|MDYSL
+          d8: (data[loff + 0x12] << 8) | data[loff + 0x13], // OCT|FNS
+          dB: (data[loff + 0x18] << 8) | data[loff + 0x19], // DISDL|DIPAN + base_note
+          baseNote: baseNote,
+        };
+
         operators.push({
           freq_ratio: roundedRatio,
           level: level,
@@ -405,7 +422,8 @@ const TonIO = (function () {
           loop_mode: lpctl,
           loop_start: lsa,
           loop_end: lea,
-          pcm: pcm, // raw waveform data for the editor to use
+          pcm: pcm,
+          rawRegs: rawRegs, // raw SCSP register data for direct slot programming
         });
       }
 

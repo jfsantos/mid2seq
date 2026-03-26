@@ -477,28 +477,8 @@ async function initSCSP() {
  * Maps editor patch params to the exact SCSP register layout.
  */
 function programSlot(slot, op, midiNote, allOps) {
-  // Compute pitch: OCT and FNS.
-  // With a 1024-sample sine, base freq at OCT=0 FNS=0 = 44100/1024 ≈ 43.07 Hz.
-  // freq_ratio shifts the operator's effective base note.
-  let opBaseNote;
-  if (op.freq_fixed > 0) {
-    opBaseNote = SINE_BASE_NOTE + 12 * Math.log2(op.freq_fixed / SINE_BASE_FREQ);
-  } else {
-    opBaseNote = SINE_BASE_NOTE - 12 * Math.log2(op.freq_ratio);
-  }
-
-  // Semitone distance from op's base note to the played MIDI note
-  const semi = midiNote - opBaseNote;
-  const octave = Math.max(-8, Math.min(7, Math.floor(semi / 12)));
-  const frac = semi - octave * 12;
-  const fns = Math.max(0, Math.min(1023, Math.round(1024 * (Math.pow(2, frac / 12) - 1))));
-
-  // OCT is signed 4-bit (-8 to +7), encoded in bits [14:11]
-  const octBits = ((octave & 0xF) << 11) | (fns & 0x3FF);
-
-  // Look up waveform from store
-  const wid = op.waveform || 0;
-  const wav = waveStore.waves[wid] || waveStore.waves[0];
+  const _wid = op.waveform || 0;
+  let wav = waveStore.waves[_wid] || waveStore.waves[0];
 
   // Resolve loop points (per-op override or waveform default)
   let lsa   = op.loop_start >= 0 ? op.loop_start : wav.loopStart;
@@ -510,9 +490,26 @@ function programSlot(slot, op, midiNote, allOps) {
   const usesFM = (op.mod_source >= 0 && op.mdl >= 5) || op.feedback > 0;
   const isMod = !op.is_carrier;
   if (usesFM || isMod) {
-    if (wav.length !== WAVE_LEN) sa = waveStore.waves[0].offset; // fallback to sine
+    if (wav.length !== WAVE_LEN) { wav = waveStore.waves[0]; sa = wav.offset; }
     lsa = 0; lea = WAVE_LEN; lpctl = 1;
   }
+
+  // Compute pitch from the FINAL waveform (after any FM swap).
+  const _wavLen = wav.length || WAVE_LEN;
+  const _wavBaseFreq = SAMPLE_RATE / _wavLen;
+  const _wavBaseNote = 69 + 12 * Math.log2(_wavBaseFreq / 440);
+
+  let opBaseNote;
+  if (op.freq_fixed > 0) {
+    opBaseNote = _wavBaseNote + 12 * Math.log2(op.freq_fixed / _wavBaseFreq);
+  } else {
+    opBaseNote = _wavBaseNote - 12 * Math.log2(op.freq_ratio);
+  }
+  const semi = midiNote - opBaseNote;
+  const octave = Math.max(-8, Math.min(7, Math.floor(semi / 12)));
+  const frac = semi - octave * 12;
+  const fns = Math.max(0, Math.min(1023, Math.round(1024 * (Math.pow(2, frac / 12) - 1))));
+  const octBits = ((octave & 0xF) << 11) | (fns & 0x3FF);
 
   const saHigh = (sa >> 16) & 0xF;
   const saLow = sa & 0xFFFF;
@@ -638,7 +635,7 @@ function programSlot(slot, op, midiNote, allOps) {
 
 function ensureAudio() {
   if (!actx) {
-    actx = new (window.AudioContext || window.webkitAudioContext)();
+    actx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 44100 });
   }
   if (actx.state === 'suspended') actx.resume();
   if (!fmNode && scspReady) {

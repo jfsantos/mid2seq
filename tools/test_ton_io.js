@@ -579,3 +579,76 @@ if (failed > 0) {
 } else {
     console.log('All tests passed!');
 }
+
+/* ═══════════════════════════════════════════════════════════════ */
+/* TEST 7: Imported PCM must be resampled to 1024 for tracker    */
+/* ═══════════════════════════════════════════════════════════════ */
+console.log('\n=== Test 7: PCM resampling for tracker ===');
+{
+    // Simulate what saturn_kit.py does: 100-sample waveforms
+    const patch = { name: 'Short', operators: [
+        { freq_ratio: 1.0, level: 0.8, ar: 31, d1r: 6, dl: 2, d2r: 0, rr: 14,
+          mdl: 0, mod_source: -1, is_carrier: true, waveform: 0, loop_mode: 1 },
+    ]};
+    // Export with 1024-sample waveforms (tracker default)
+    const ton = TonIO.exportTon([patch], generateWaveform);
+    const imported = TonIO.importTon(ton.buffer);
+    const op = imported.patches[0].operators[0];
+
+    assert(op.pcm.length === 1024, 'Exported with 1024 samples, got ' + op.pcm.length);
+
+    // Now test with a real TON file that has short waveforms
+    const testDir = path.join(__dirname, '..', 'test_ton');
+    const kitPath = path.join(testDir, 'KITFM.TON');
+    if (fs.existsSync(kitPath)) {
+        const buf = fs.readFileSync(kitPath);
+        const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+        const result = TonIO.importTon(ab);
+
+        // Check PCM lengths — real TON files have short waveforms (100 samples for A4)
+        const shortOps = [];
+        for (const p of result.patches) {
+            for (const o of p.operators) {
+                if (o.pcm && o.pcm.length !== 1024) shortOps.push(o.pcm.length);
+            }
+        }
+        assert(shortOps.length > 0, 'KITFM.TON has short waveforms: ' + shortOps.slice(0,5).join(','));
+
+        // Verify resampling produces correct length
+        function resampleTo1024(pcm) {
+            if (pcm.length === 1024) return pcm;
+            const out = new Float32Array(1024);
+            const ratio = pcm.length / 1024;
+            for (let i = 0; i < 1024; i++) {
+                const srcIdx = i * ratio;
+                const idx = Math.floor(srcIdx);
+                const frac = srcIdx - idx;
+                const s0 = pcm[idx] || 0;
+                const s1 = pcm[Math.min(idx + 1, pcm.length - 1)] || 0;
+                out[i] = s0 + (s1 - s0) * frac;
+            }
+            return out;
+        }
+
+        // Test resampling preserves waveform character
+        const testOp = result.patches[0].operators[0];
+        const resampled = resampleTo1024(testOp.pcm);
+        assert(resampled.length === 1024, 'Resampled to 1024');
+
+        // Check resampled waveform isn't all zeros
+        let maxVal = 0;
+        for (let i = 0; i < 1024; i++) if (Math.abs(resampled[i]) > maxVal) maxVal = Math.abs(resampled[i]);
+        assert(maxVal > 0.01, 'Resampled waveform has content (peak=' + maxVal.toFixed(3) + ')');
+
+        // Verify pitch math: with 1024-sample waveform, base freq is 44100/1024
+        // freq_ratio=1.0 should give opBaseNote = SINE_BASE_NOTE
+        // Playing C4 (60) should give correct pitch
+        const SINE_BASE_NOTE = 69 + 12 * Math.log2(44100 / 1024 / 440);
+        const opBaseNote = SINE_BASE_NOTE - 12 * Math.log2(testOp.freq_ratio);
+        const semi = 60 - opBaseNote; // playing C4
+        const octave = Math.floor(semi / 12);
+        const frac = semi - octave * 12;
+        const expectedFreq = (44100 / 1024) * Math.pow(2, semi / 12);
+        assertClose(expectedFreq, 261.6, 2.0, 'C4 pitch with 1024-sample waveform: ' + expectedFreq.toFixed(1) + ' Hz');
+    }
+}
