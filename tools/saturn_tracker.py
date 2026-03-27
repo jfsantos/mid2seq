@@ -46,6 +46,14 @@ def generate_html():
     else:
         ton_io_js = "var TonIO = null;"
 
+    # Load scspdspasm.js
+    dspasm_path = os.path.join(os.path.dirname(__file__), 'scspdspasm.js')
+    if os.path.exists(dspasm_path):
+        with open(dspasm_path, 'r') as f:
+            dspasm_js = f.read()
+    else:
+        dspasm_js = "function scspdspAssemble(){return {errors:['assembler not found'],mpro:new Uint16Array(512),coef:new Int16Array(64),madrs:new Uint16Array(32),rbl:0,steps:0};}"
+
     # Embed demo MIDI and example TON files
     demo_midi_b64 = ""
     demo_midi_path = os.path.join(os.path.dirname(__file__), '..', 'examples', 'kit_demo.mid')
@@ -67,6 +75,7 @@ def generate_html():
     html = _HTML_TEMPLATE.replace('__SCSP_WASM_B64__', wasm_b64)
     html = html.replace('__SCSP_GLUE_JS__', glue_js)
     html = html.replace('__TON_IO_JS__', ton_io_js)
+    html = html.replace('__DSPASM_JS__', dspasm_js)
     html = html.replace('__DEMO_MIDI_B64__', demo_midi_b64)
     html = html.replace('__EXAMPLE_TONS_JSON__', tons_json)
     return html
@@ -205,6 +214,32 @@ body { font-family: 'SF Mono', Consolas, Monaco, monospace; background: #0a0a1a;
 #env-section { flex: 2; }
 #wave-section { flex: 1; }
 #routing-section { flex: 1; min-width: 160px; position: relative; }
+/* DSP panel — independent expandable bottom panel */
+#dsp-panel { height: 0; background: #0d0d1a; border-top: 1px solid #333; flex-shrink: 0;
+             overflow: hidden; transition: height 0.2s ease; display: flex; flex-direction: column; }
+#dsp-panel.open { height: 300px; }
+#dsp-panel-header { display: flex; align-items: center; padding: 4px 12px; gap: 6px;
+                    background: #0f1a0f; border-bottom: 1px solid #333; flex-shrink: 0; }
+#dsp-panel-header h3 { font-size: 11px; color: #4f8; margin: 0; }
+#dsp-panel-header button { background: #2a3a4e; color: #ccc; border: 1px solid #444; padding: 2px 8px;
+                            cursor: pointer; border-radius: 3px; font-family: inherit; font-size: 10px; }
+#dsp-panel-header button:hover { background: #3a5a6e; }
+#dsp-panel-header button.active { background: #1a5a3e; border-color: #4f8; color: #4f8; }
+#dsp-panel-header .dsp-status { font-size: 9px; color: #666; }
+#dsp-panel-header .dsp-error { color: #f66; }
+#dsp-panel-body { flex: 1; display: flex; gap: 12px; padding: 8px 12px; min-height: 0; overflow: hidden; }
+#dsp-code-col { flex: 3; display: flex; flex-direction: column; min-width: 0; }
+#dsp-code-col textarea { flex: 1; width: 100%; background: #0a0a14; color: #8f8; border: 1px solid #333;
+                          border-radius: 4px; font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 10px;
+                          padding: 4px 6px; resize: none; tab-size: 2; line-height: 1.4; }
+#dsp-code-col textarea:focus { outline: 1px solid #4f8; border-color: #4f8; }
+#dsp-knobs-col { flex: 2; display: flex; flex-direction: column; min-width: 180px; overflow-y: auto; }
+#dsp-knobs-col h4 { font-size: 10px; color: #888; margin: 0 0 6px 0; }
+#dsp-knobs { display: flex; flex-direction: column; gap: 5px; }
+.dsp-knob { display: flex; align-items: center; gap: 4px; }
+.dsp-knob label { font-size: 9px; color: #aaa; min-width: 48px; text-align: right; }
+.dsp-knob input[type=range] { flex: 1; height: 10px; min-width: 60px; }
+.dsp-knob .dsp-knob-val { font-size: 9px; color: #8f8; min-width: 36px; text-align: right; font-family: monospace; }
 #env-time-label { color: #555; font-weight: normal; font-size: 9px; }
 #wave-controls { display: flex; gap: 6px; align-items: center; margin-top: 4px; flex-shrink: 0; font-size: 10px; }
 #wave-controls select, #wave-controls input { background: #222; color: #ccc; border: 1px solid #444;
@@ -283,6 +318,8 @@ body { font-family: 'SF Mono', Consolas, Monaco, monospace; background: #0a0a1a;
     </select>
     <button onclick="importTonForTracker()">Browse...</button>
   </div>
+  <span class="transport-sep">|</span>
+  <button onclick="toggleDspPanel()" style="color:#4f8;">DSP</button>
 </div>
 
 <!-- Song arrangement -->
@@ -352,6 +389,66 @@ body { font-family: 'SF Mono', Consolas, Monaco, monospace; background: #0a0a1a;
   </div>
 </div>
 
+<!-- DSP Effect Panel (independent) -->
+<div id="dsp-panel">
+  <div id="dsp-panel-header">
+    <h3>DSP Effect</h3>
+    <button onclick="dspCompile()" title="Compile & load (Ctrl+Enter)">Compile</button>
+    <button id="dsp-enable-btn" onclick="dspToggleEnable()">Enable</button>
+    <label style="font-size:9px;color:#aaa;">Send:</label>
+    <input type="range" id="dsp-send" min="0" max="7" value="7" step="1"
+           style="width:48px;height:10px;" oninput="dspUpdateSend(this.value)">
+    <label style="font-size:9px;color:#aaa;">RBL:</label>
+    <select id="dsp-rbl" style="background:#222;color:#ccc;border:1px solid #444;font-size:9px;padding:1px;">
+      <option value="0">8Kw</option><option value="1" selected>16Kw</option>
+      <option value="2">32Kw</option><option value="3">64Kw</option>
+    </select>
+    <button onclick="dspLoadExb()" title="Load .EXB file">Load EXB</button>
+    <span class="dsp-status" id="dsp-status"></span>
+    <span style="flex:1"></span>
+    <button onclick="toggleDspPanel()">Close</button>
+  </div>
+  <div id="dsp-panel-body">
+    <div id="dsp-code-col">
+      <textarea id="dsp-code" spellcheck="false">' Delay effect — edit and press Compile (Ctrl+Enter)
+' NOTE: memory reads/writes only work on odd DSP steps.
+' NOP pads are used to align MR/MW to odd positions.
+
+#COEF
+Send = %100
+Fb = %40
+Dry = %50
+Wet = %75
+
+#ADRS
+wa = ms0.0
+ra = ms200.0
+
+#PROG
+' Read delayed sample from ring buffer
+NOP                                    ' step 0 (even) — align
+MR MR[ra + DEC]                        ' step 1 (ODD) — memory read works
+NOP                                    ' step 2 (even) — pipeline delay
+IW MEMS00                              ' step 3 — store read value
+' Write input + feedback to delay line
+@ MIXS00 * Send + (MEMS00 * Fb +)     ' steps 4-5 — compute
+NOP                                    ' step 6 (even) — align
+> MW[wa + DEC]                         ' step 7 (ODD) — memory write works
+' Output: dry + wet to left and right
+@ MIXS00 * Dry + (MEMS00 * Wet +)     ' steps 8-9
+> S1 EFREG00                           ' step 10 — left out
+@ MIXS00 * Dry + (MEMS00 * Wet +)     ' steps 11-12
+> S1 EFREG01                           ' step 13 — right out
+
+=END</textarea>
+    </div>
+    <div id="dsp-knobs-col">
+      <h4>Parameters</h4>
+      <div id="dsp-knobs"></div>
+    </div>
+  </div>
+</div>
+
 <!-- Status -->
 <div id="status">
   <span class="info" id="status-pos">Row: 00</span>
@@ -362,6 +459,11 @@ body { font-family: 'SF Mono', Consolas, Monaco, monospace; background: #0a0a1a;
 <!-- TON I/O -->
 <script>
 __TON_IO_JS__
+</script>
+
+<!-- DSP Assembler -->
+<script>
+__DSPASM_JS__
 </script>
 
 <script>
@@ -580,8 +682,11 @@ function programSlot(slot, op, midiNote, allOps) {
     scsp._scsp_write_slot(slot, 0x7, d7);
     scsp._scsp_write_slot(slot, 0x8, octBits);
     scsp._scsp_write_slot(slot, 0x9, 0);
-    scsp._scsp_write_slot(slot, 0xA, 0);
-    scsp._scsp_write_slot(slot, 0xB, dB);
+    // ISEL/IMXL: route to DSP if enabled
+    const dspSendA = (dspState.enabled && dspState.compiled) ? (dspState.sendLevel & 7) : 0;
+    scsp._scsp_write_slot(slot, 0xA, dspSendA);
+    // DISDL/DIPAN only — preserves EFSDL/EFPAN in lower byte of reg 0xB
+    scsp._scsp_slot_set_direct_output(slot, (dB >> 13) & 7, (dB >> 8) & 0x1F);
 }
 
 /*
@@ -647,8 +752,12 @@ function programSlotRaw(slot, rawRegs, midiNote, sa, slotBase, opIndex, wavLen, 
     scsp._scsp_write_slot(slot, 0x7, d7);
     scsp._scsp_write_slot(slot, 0x8, octBits);
     scsp._scsp_write_slot(slot, 0x9, 0);
-    scsp._scsp_write_slot(slot, 0xA, 0);
-    scsp._scsp_write_slot(slot, 0xB, rawRegs.dB & 0xFF00); // DISDL|DIPAN in bits 15:8
+    const dspSendR = (dspState.enabled && dspState.compiled) ? (dspState.sendLevel & 7) : 0;
+    scsp._scsp_write_slot(slot, 0xA, dspSendR);
+    // DISDL/DIPAN only — preserves EFSDL/EFPAN in lower byte of reg 0xB
+    const disdlR = (rawRegs.dB >> 13) & 7;
+    const dipanR = (rawRegs.dB >> 8) & 0x1F;
+    scsp._scsp_slot_set_direct_output(slot, disdlR, dipanR);
 }
 
 function ensureAudio() {
@@ -678,6 +787,8 @@ function ensureAudio() {
         fmGain.connect(lpf);
         lpf.connect(compressor);
         compressor.connect(actx.destination);
+        let dspLfoPhase = 0;  // persistent LFO phase across callbacks
+
         fmNode.onaudioprocess = function(e) {
             const outL = e.outputBuffer.getChannelData(0);
             const outR = e.outputBuffer.numberOfChannels > 1 ? e.outputBuffer.getChannelData(1) : outL;
@@ -687,11 +798,39 @@ function ensureAudio() {
             // Process playback engine before rendering
             if (playback.playing) playback.processBlock(n);
 
-            const bufPtr = scsp._scsp_render(n);
-            const heap16 = new Int16Array(scsp.HEAP16.buffer, bufPtr, n * 2);
-            for (let i = 0; i < n; i++) {
-                outL[i] = heap16[i * 2]     / 32768.0;
-                outR[i] = heap16[i * 2 + 1] / 32768.0;
+            // If DSP has LFO targets, render in chunks with parameter updates
+            if (dspState.enabled && dspState.lfoTargets.length > 0) {
+                const CHUNK = 64;  // ~689 Hz LFO update rate
+                let written = 0;
+                while (written < n) {
+                    const chunk = Math.min(CHUNK, n - written);
+                    // Update LFO modulation
+                    dspLfoPhase += chunk / 44100;
+                    for (const lfo of dspState.lfoTargets) {
+                        const mod = Math.sin(dspLfoPhase * 2 * Math.PI * lfo.rate) * lfo.depth;
+                        if (lfo.type === 'coef') {
+                            const v13 = Math.round(4095 * Math.max(0, Math.min(1, (lfo.center + mod) / 100)));
+                            scsp._scsp_dsp_set_coef(lfo.index, ((v13 << 3) & 0xFFFF) << 16 >> 16);
+                        } else if (lfo.type === 'madrs') {
+                            const samples = Math.round(44100 * Math.max(0, lfo.center + mod) / 1000);
+                            scsp._scsp_dsp_set_madrs(lfo.index, samples & 0xFFFF);
+                        }
+                    }
+                    const bufPtr = scsp._scsp_render(chunk);
+                    const heap16 = new Int16Array(scsp.HEAP16.buffer, bufPtr, chunk * 2);
+                    for (let i = 0; i < chunk; i++) {
+                        outL[written + i] = heap16[i * 2]     / 32768.0;
+                        outR[written + i] = heap16[i * 2 + 1] / 32768.0;
+                    }
+                    written += chunk;
+                }
+            } else {
+                const bufPtr = scsp._scsp_render(n);
+                const heap16 = new Int16Array(scsp.HEAP16.buffer, bufPtr, n * 2);
+                for (let i = 0; i < n; i++) {
+                    outL[i] = heap16[i * 2]     / 32768.0;
+                    outR[i] = heap16[i * 2 + 1] / 32768.0;
+                }
             }
         };
     }
@@ -1726,11 +1865,21 @@ function toggleInstDetail() {
     const panel = document.getElementById('inst-detail');
     panel.classList.toggle('open');
     if (panel.classList.contains('open')) {
-        // Wait for CSS transition to finish so canvases get correct dimensions
+        // Close DSP panel if open (only one bottom panel at a time)
+        document.getElementById('dsp-panel').classList.remove('open');
         panel.addEventListener('transitionend', function onEnd() {
             panel.removeEventListener('transitionend', onEnd);
             refreshInstDetail();
         });
+    }
+}
+
+function toggleDspPanel() {
+    const panel = document.getElementById('dsp-panel');
+    panel.classList.toggle('open');
+    if (panel.classList.contains('open')) {
+        // Close instrument detail if open
+        document.getElementById('inst-detail').classList.remove('open');
     }
 }
 
@@ -1755,6 +1904,257 @@ function refreshInstDetail() {
     drawRouting();
     renderWaveControls();
 }
+
+// ═══════════════════════════════════════════════════════════════
+// DSP EFFECT EDITOR
+// ═══════════════════════════════════════════════════════════════
+
+const dspState = {
+    enabled: false,
+    compiled: false,
+    sendLevel: 7,         // IMXL value for slots (0-7)
+    rbl: 1,               // ring buffer length selector
+    coefNames: [],        // from assembler: [{name, index}]
+    madrsNames: [],       // from assembler: [{name, index}]
+    lfoTargets: [],       // [{type:'coef'|'madrs', index, rate, depth, center}]
+};
+
+
+function dspCompile() {
+    if (!scspReady) { dspSetStatus('SCSP not ready', true); return; }
+    const code = document.getElementById('dsp-code').value;
+    const rbl = parseInt(document.getElementById('dsp-rbl').value) || 0;
+    dspState.rbl = rbl;
+
+    const result = scspdspAssemble(code, { rbl });
+    if (result.errors.length) {
+        dspSetStatus(result.errors[0], true);
+        return;
+    }
+    if (result.steps === 0) {
+        dspSetStatus('No program steps', true);
+        return;
+    }
+
+    // Load into WASM via load_arrays
+    const mproPtr = scsp._malloc(result.mpro.byteLength);
+    const coefPtr = scsp._malloc(result.coef.byteLength);
+    const madrsPtr = scsp._malloc(result.madrs.byteLength);
+    scsp.HEAPU16.set(result.mpro, mproPtr >> 1);
+    scsp.HEAP16.set(result.coef, coefPtr >> 1);
+    scsp.HEAPU16.set(result.madrs, madrsPtr >> 1);
+    scsp._scsp_dsp_load_arrays(mproPtr, result.mpro.length, coefPtr, result.coef.length,
+                                madrsPtr, result.madrs.length, rbl);
+    scsp._free(mproPtr);
+    scsp._free(coefPtr);
+    scsp._free(madrsPtr);
+
+    dspState.compiled = true;
+    dspSetStatus(result.steps + ' steps loaded', false);
+
+    // Extract named COEF/MADRS for knob generation
+    dspExtractKnobs(code, result);
+
+    // Auto-enable if not already
+    if (!dspState.enabled) dspToggleEnable();
+    // Apply send to any currently active voices
+    dspApplySendToActiveSlots();
+}
+
+function dspExtractKnobs(code, result) {
+    // Parse the source to find named COEF and ADRS definitions
+    dspState.coefNames = [];
+    dspState.madrsNames = [];
+
+    let section = null;
+    let coefIdx = 1;  // 0 is always ZERO
+    let adrsIdx = 0;
+    for (const raw of code.split(String.fromCharCode(10))) {
+        const line = raw.split("'")[0].trim();
+        if (!line) continue;
+        const u = line.toUpperCase();
+        if (u === '#COEF') { section = 'COEF'; continue; }
+        if (u === '#ADRS') { section = 'ADRS'; continue; }
+        if (u === '#PROG' || u === '#END' || u === '=END') { section = null; continue; }
+        const m = line.match(/^\s*([A-Za-z][A-Za-z0-9]{0,14})\s*=\s*(.+?)\s*$/);
+        if (!m) continue;
+        if (section === 'COEF') {
+            dspState.coefNames.push({ name: m[1], index: coefIdx, rawExpr: m[2].trim() });
+            coefIdx++;
+        } else if (section === 'ADRS') {
+            dspState.madrsNames.push({ name: m[1], index: adrsIdx, rawExpr: m[2].trim() });
+            adrsIdx++;
+        }
+    }
+    dspRenderKnobs();
+}
+
+function dspRenderKnobs() {
+    const el = document.getElementById('dsp-knobs');
+    el.innerHTML = '';
+    // COEF knobs (0-100% range mapped to 13-bit signed → shifted <<3)
+    for (const c of dspState.coefNames) {
+        const currentRaw = scsp._scsp_dsp_get_coef(c.index);
+        // Convert from shifted value back to 0-100 percentage
+        const current13 = (currentRaw >> 3) & 0x1FFF;
+        const pct = Math.round((current13 / 4095) * 100);
+
+        const wrap = document.createElement('div');
+        wrap.className = 'dsp-knob';
+        const lbl = document.createElement('label');
+        lbl.textContent = c.name;
+        const inp = document.createElement('input');
+        inp.type = 'range'; inp.min = 0; inp.max = 100; inp.step = 1; inp.value = pct;
+        const val = document.createElement('span');
+        val.className = 'dsp-knob-val';
+        val.textContent = pct + '%';
+
+        inp.oninput = () => {
+            const p = parseInt(inp.value);
+            val.textContent = p + '%';
+            const v13 = Math.round(4095 * p / 100);
+            const shifted = (v13 << 3) & 0xFFFF;
+            scsp._scsp_dsp_set_coef(c.index, shifted > 32767 ? shifted - 65536 : shifted);
+        };
+        wrap.appendChild(lbl);
+        wrap.appendChild(inp);
+        wrap.appendChild(val);
+        el.appendChild(wrap);
+    }
+    // MADRS knobs (delay time in ms)
+    for (const a of dspState.madrsNames) {
+        const currentSamples = scsp._scsp_dsp_get_madrs(a.index);
+        const currentMs = (currentSamples / 44100 * 1000);
+
+        const wrap = document.createElement('div');
+        wrap.className = 'dsp-knob';
+        const lbl = document.createElement('label');
+        lbl.textContent = a.name;
+        const inp = document.createElement('input');
+        inp.type = 'range'; inp.min = 0; inp.max = 500; inp.step = 1;
+        inp.value = Math.round(currentMs);
+        const val = document.createElement('span');
+        val.className = 'dsp-knob-val';
+        val.textContent = Math.round(currentMs) + 'ms';
+
+        inp.oninput = () => {
+            const ms = parseInt(inp.value);
+            val.textContent = ms + 'ms';
+            const samples = Math.round(44100 * ms / 1000) & 0xFFFF;
+            scsp._scsp_dsp_set_madrs(a.index, samples);
+        };
+        wrap.appendChild(lbl);
+        wrap.appendChild(inp);
+        wrap.appendChild(val);
+        el.appendChild(wrap);
+    }
+}
+
+function dspToggleEnable() {
+    if (!scspReady) return;
+    dspState.enabled = !dspState.enabled;
+    const btn = document.getElementById('dsp-enable-btn');
+    if (dspState.enabled) {
+        btn.classList.add('active');
+        btn.textContent = 'Enabled';
+        if (dspState.compiled) scsp._scsp_dsp_start();
+        // Apply IMXL to all slots and set EFSDL on slots 0-1.
+        // The EFSDL bits are also maintained by programSlot/programSlotRaw
+        // on every note-on, but we set them here for already-sounding notes.
+        dspApplySendToActiveSlots();
+        dspApplyEfsdl();
+    } else {
+        btn.classList.remove('active');
+        btn.textContent = 'Enable';
+        scsp._scsp_dsp_stop();
+        scsp._scsp_dsp_clear();
+        // Clear IMXL and EFSDL on all slots via register writes
+        for (let s = 0; s < 32; s++) {
+            scsp._scsp_write_slot(s, 0xA, 0);
+            // Clear lower byte of 0xB (EFSDL/EFPAN) while preserving upper (DISDL/DIPAN)
+            const cur0xB = scsp._scsp_dsp_get_efreg ? 0 : 0;  // can't read reg, just clear
+            scsp._scsp_slot_set_effect_output(s, 0, 0);
+        }
+    }
+}
+
+// Write EFSDL/EFPAN to slots 0-1 for EFREG stereo wet return.
+// Uses scsp_write_slot which goes through the proper register update path.
+function dspApplyEfsdl() {
+    if (!scspReady || !dspState.enabled) return;
+    // We need to set the lower byte of reg 0xB without clobbering the upper byte.
+    // scsp_slot_set_effect_output does exactly this (masks with 0xFF00 preserve).
+    scsp._scsp_slot_set_effect_output(0, 7, 0x1F);  // EFREG0 → left
+    scsp._scsp_slot_set_effect_output(1, 7, 0x0F);  // EFREG1 → right
+}
+
+function dspUpdateSend(val) {
+    dspState.sendLevel = parseInt(val) || 0;
+    if (dspState.enabled) dspApplySendToActiveSlots();
+}
+
+function dspApplySendToActiveSlots() {
+    if (!scspReady || !dspState.enabled) return;
+    // Apply IMXL to all allocated voice slots
+    for (let s = 0; s < 32; s++) {
+        scsp._scsp_slot_set_effect_send(s, 0, dspState.sendLevel);
+    }
+}
+
+function dspSetStatus(msg, isError) {
+    const el = document.getElementById('dsp-status');
+    el.textContent = msg;
+    el.className = 'dsp-status' + (isError ? ' dsp-error' : '');
+}
+
+function dspLoadExb() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.exb,.EXB';
+    input.onchange = async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const buf = await file.arrayBuffer();
+        if (buf.byteLength < 0x540) { dspSetStatus('File too small for EXB', true); return; }
+        await initSCSP();
+        const ptr = scsp._malloc(buf.byteLength);
+        scsp.HEAPU8.set(new Uint8Array(buf), ptr);
+        scsp._scsp_dsp_load_exb(ptr, buf.byteLength);
+        scsp._free(ptr);
+        dspState.compiled = true;
+        // Parse EXB to show name and generate knobs from it
+        const parsed = scspdspParseExb(new Uint8Array(buf));
+        dspSetStatus('Loaded: ' + (parsed.name || file.name) + ' (' + parsed.steps + ' steps)', false);
+        // Can't extract named knobs from EXB (no source), clear them
+        dspState.coefNames = [];
+        dspState.madrsNames = [];
+        document.getElementById('dsp-knobs').innerHTML = '';
+        document.getElementById('dsp-rbl').value = parsed.rbl;
+        if (!dspState.enabled) dspToggleEnable();
+        dspApplySendToActiveSlots();
+    };
+    input.click();
+}
+
+// Keyboard shortcut: Ctrl+Enter in DSP editor compiles
+document.addEventListener('DOMContentLoaded', () => {
+    const ta = document.getElementById('dsp-code');
+    if (ta) {
+        ta.addEventListener('keydown', (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                e.preventDefault();
+                dspCompile();
+            }
+            // Tab key inserts spaces instead of moving focus
+            if (e.key === 'Tab') {
+                e.preventDefault();
+                const s = ta.selectionStart;
+                ta.value = ta.value.substring(0, s) + '  ' + ta.value.substring(ta.selectionEnd);
+                ta.selectionStart = ta.selectionEnd = s + 2;
+            }
+        });
+    }
+});
 
 function applyWavePreset(val) {
     const wid = parseInt(val);
