@@ -411,8 +411,8 @@ body { font-family: 'SF Mono', Consolas, Monaco, monospace; background: #0a0a1a;
   <div id="dsp-panel-body">
     <div id="dsp-code-col">
       <textarea id="dsp-code" spellcheck="false">' Delay effect — edit and press Compile (Ctrl+Enter)
-' NOTE: memory reads/writes only work on odd DSP steps.
-' NOP pads are used to align MR/MW to odd positions.
+' Memory reads/writes are auto-aligned to odd DSP steps.
+' (The assembler inserts NOPs if needed.)
 
 #COEF
 Send = %100
@@ -1950,7 +1950,13 @@ function dspCompile() {
     scsp._free(madrsPtr);
 
     dspState.compiled = true;
-    dspSetStatus(result.steps + ' steps loaded', false);
+    let statusMsg = result.steps + ' steps loaded';
+    if (result.warnings && result.warnings.length) {
+        statusMsg += ' (' + result.warnings.length + ' NOP' +
+            (result.warnings.length > 1 ? 's' : '') + ' inserted for alignment)';
+        console.log('DSP alignment:', result.warnings.join('\\n'));
+    }
+    dspSetStatus(statusMsg, false);
 
     // Extract named COEF/MADRS for knob generation
     dspExtractKnobs(code, result);

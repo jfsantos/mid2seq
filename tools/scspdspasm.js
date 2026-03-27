@@ -87,6 +87,14 @@ class Symbols {
     }
 }
 
+// ─── Instruction helpers ────────────────────────────────────────────
+
+/** True if a packed MPRO word-quad accesses external memory (MRD or MWT). */
+function instrAccessesMem(words) {
+    // w1 (index 2) bit layout: MWT<<14 | MRD<<13
+    return (words[2] & 0x6000) !== 0;
+}
+
 // ─── Micro-instruction encoder ──────────────────────────────────────
 // Returns [w3, w2, w1, w0] (4 × uint16, big-endian word order)
 // matching the MPRO layout in the SCSPDSP struct.
@@ -142,6 +150,9 @@ function packMpro(f) {
 
     return [w3 & 0xFFFF, w2 & 0xFFFF, w1 & 0xFFFF, w0 & 0xFFFF];
 }
+
+/** Packed NOP instruction words. */
+const NOP_PACKED = packMpro({ BSEL: 1, YSEL: 1, CRA: 0, SHFT: 0 });
 
 // ─── Input source helpers ───────────────────────────────────────────
 
@@ -432,6 +443,36 @@ class Assembler {
         }));
     }
 
+    /**
+     * Insert NOPs so that every memory-accessing instruction (MRD/MWT)
+     * lands on an odd-numbered DSP step.  Returns the number of NOPs
+     * inserted and an array of warning strings.
+     */
+    alignMemoryOps() {
+        const aligned = [];
+        const warnings = [];
+        for (let i = 0; i < this.progWords.length; i++) {
+            const w = this.progWords[i];
+            if (instrAccessesMem(w) && (aligned.length & 1) === 0) {
+                // Would land on an even step — insert a NOP first
+                warnings.push(
+                    `Inserted NOP at step ${aligned.length} to align memory ` +
+                    `access (originally instruction ${i + 1}) to odd step ${aligned.length + 1}`
+                );
+                aligned.push(NOP_PACKED);
+            }
+            aligned.push(w);
+        }
+        if (aligned.length > 128) {
+            warnings.push(
+                `Program is ${aligned.length} steps after alignment ` +
+                `(max 128) — truncated`
+            );
+        }
+        this.progWords = aligned;
+        return warnings;
+    }
+
     /** Build typed arrays ready for scsp_dsp_load_arrays(). */
     getArrays(rbl) {
         // COEF: shift left by 3 (SCSP reads bits [15:3] as 13-bit signed)
@@ -504,15 +545,21 @@ class Assembler {
  */
 function scspdspAssemble(text, opts) {
     const errors = [];
+    const warnings = [];
     const asm = new Assembler();
     try {
         asm.assemble(text);
     } catch (e) {
         errors.push(e.message);
     }
+    // Auto-align memory ops to odd steps (insert NOPs as needed)
+    if (!errors.length) {
+        warnings.push(...asm.alignMemoryOps());
+    }
     const rbl = (opts && opts.rbl != null) ? opts.rbl : 0;
     const result = asm.getArrays(rbl);
     result.errors = errors;
+    result.warnings = warnings;
     return result;
 }
 
@@ -524,11 +571,15 @@ function scspdspAssemble(text, opts) {
  */
 function scspdspAssembleExb(text, opts) {
     const errors = [];
+    const warnings = [];
     const asm = new Assembler();
     try {
         asm.assemble(text);
     } catch (e) {
         errors.push(e.message);
+    }
+    if (!errors.length) {
+        warnings.push(...asm.alignMemoryOps());
     }
     const rbl = (opts && opts.rbl != null) ? opts.rbl : 0;
     const name = (opts && opts.name) || 'effect.EXB';
@@ -536,6 +587,7 @@ function scspdspAssembleExb(text, opts) {
         exb: asm.getExb(name, rbl),
         steps: asm.progWords.length,
         errors,
+        warnings,
     };
 }
 
