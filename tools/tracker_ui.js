@@ -112,6 +112,10 @@ var TrackerUI = (function() {
      * @returns {number} Current octave (defaults to 4) */
     function getOctave() { return parseInt(document.getElementById('octave').value) || 4; }
 
+    /** @description Read edit step from DOM input. Cursor advances by this many rows after note/off entry.
+     * @returns {number} Edit step (defaults to 1, 0 = stay in place) */
+    function getEditStep() { var v = parseInt(document.getElementById('edit-step').value); return isNaN(v) ? 1 : Math.max(0, v); }
+
     // ═══════════════════════════════════════════════════════════════
     // UI: GRID RENDERING
     // ═══════════════════════════════════════════════════════════════
@@ -300,7 +304,8 @@ var TrackerUI = (function() {
         if (e.key === 'Delete' || e.key === 'Backspace') {
             e.preventDefault();
             pat.channels[cur.ch].rows[cur.row] = { note: null, inst: null, vol: null };
-            if (e.key === 'Backspace' && cur.row > 0) cur.row--;
+            if (e.key === 'Backspace') { cur.row = Math.max(cur.row - getEditStep(), 0); }
+            else { cur.row = Math.min(cur.row + getEditStep(), pat.length - 1); }
             renderGrid();
             return;
         }
@@ -331,7 +336,7 @@ var TrackerUI = (function() {
             e.preventDefault();
             pat.channels[cur.ch].rows[cur.row].note = -1;
             pat.channels[cur.ch].rows[cur.row].inst = null;
-            cur.row = Math.min(cur.row + 1, pat.length - 1);
+            cur.row = Math.min(cur.row + getEditStep(), pat.length - 1);
             renderGrid();
             return;
         }
@@ -355,7 +360,7 @@ var TrackerUI = (function() {
                 setTimeout(() => engine.releaseChannel(cur.ch), 300);
             }
 
-            cur.row = Math.min(cur.row + 1, pat.length - 1);
+            cur.row = Math.min(cur.row + getEditStep(), pat.length - 1);
             renderGrid();
             return;
         }

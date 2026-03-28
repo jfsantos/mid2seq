@@ -549,11 +549,13 @@ var SCSPEngine = (function() {
             var tab = document.createElement('span');
             tab.className = 'op-tab' + (i === selectedOp ? ' sel' : '') + (inst.operators[i].is_carrier ? ' carrier' : '');
             tab.textContent = 'Op' + (i + 1);
+            tab.title = inst.operators[i].is_carrier ? 'Carrier — outputs audio directly' : 'Modulator — shapes other operators\' timbre via FM';
             tab.onclick = (function(idx) { return function() { _renderInstEditor(container, inst, idx, onChange); }; })(i);
             tabBar.appendChild(tab);
         }
         var addOp = document.createElement('span');
         addOp.className = 'op-tab'; addOp.textContent = '+';
+        addOp.title = 'Add operator (up to 6). New operators start as carriers — set Mod source on another op to use as modulator.';
         addOp.onclick = function() {
             if (inst.operators.length >= 6) return;
             inst.operators.push({ freq_ratio:1.0, freq_fixed:0, level:0.8, ar:31, d1r:0, dl:0, d2r:0, rr:14, mdl:0, mod_source:-1, feedback:0, is_carrier:true, waveform:0, loop_mode:1, loop_start:0, loop_end:1024 });
@@ -564,6 +566,7 @@ var SCSPEngine = (function() {
         if (inst.operators.length > 1) {
             var rmOp = document.createElement('span');
             rmOp.className = 'op-tab'; rmOp.textContent = '-';
+            rmOp.title = 'Remove the selected operator';
             rmOp.onclick = function() {
                 inst.operators.splice(selectedOp, 1);
                 var newSel = selectedOp >= inst.operators.length ? inst.operators.length - 1 : selectedOp;
@@ -574,24 +577,64 @@ var SCSPEngine = (function() {
         }
         container.appendChild(tabBar);
 
+        // Collapsible help section
+        var helpToggle = document.createElement('div');
+        helpToggle.style.cssText = 'font-size:9px;color:#668;cursor:pointer;margin:4px 0 6px;user-select:none;';
+        helpToggle.textContent = '\u24d8 Operator help';
+        var helpBox = document.createElement('div');
+        helpBox.style.cssText = 'display:none;font-size:9px;color:#889;background:#0e0e22;border:1px solid #2a2a4e;border-radius:3px;padding:6px 8px;margin-bottom:6px;line-height:1.5;';
+        helpBox.innerHTML =
+            '<b style="color:#00d4ff;">FM Synthesis Basics</b><br>' +
+            '<b>Carriers</b> (green tabs) produce audible sound. ' +
+            '<b>Modulators</b> shape the timbre of the operator they feed into.<br><br>' +
+            '<b style="color:#00d4ff;">Adding Operators</b><br>' +
+            'Click <b>+</b> to add (up to 6). New ops start as carriers.<br><br>' +
+            '<b style="color:#00d4ff;">Wiring Operators</b><br>' +
+            '1. Add a second operator<br>' +
+            '2. Uncheck <b>Carrier</b> on the modulator op<br>' +
+            '3. On the carrier op, set <b>Mod</b> to the modulator<br>' +
+            '4. Adjust <b>MDL</b> to control modulation intensity<br>' +
+            'The modulator\'s <b>Ratio</b> sets the harmonic relationship.<br><br>' +
+            '<b style="color:#00d4ff;">Envelope (ADSR)</b><br>' +
+            '<b>AR</b> \u2192 attack, <b>D1R</b> \u2192 decay to <b>DL</b> sustain level, ' +
+            '<b>D2R</b> \u2192 sustain fade, <b>RR</b> \u2192 release after note-off.<br>' +
+            'On modulators, the envelope shapes how the timbre evolves over time.';
+        helpToggle.onclick = function() {
+            var open = helpBox.style.display !== 'none';
+            helpBox.style.display = open ? 'none' : 'block';
+            helpToggle.textContent = (open ? '\u24d8' : '\u24e7') + ' Operator help';
+        };
+        container.appendChild(helpToggle);
+        container.appendChild(helpBox);
+
         var op = inst.operators[selectedOp];
         if (!op) return;
 
         var params = [
-            { key:'freq_ratio', label:'Ratio', min:0.5, max:16, step:0.001, fmt: function(v) { return v.toFixed(3); } },
-            { key:'level', label:'Level', min:0, max:1, step:0.01, fmt: function(v) { return v.toFixed(2); } },
-            { key:'ar', label:'AR', min:0, max:31, step:1, fmt: function(v) { return Math.round(v); } },
-            { key:'d1r', label:'D1R', min:0, max:31, step:1, fmt: function(v) { return Math.round(v); } },
-            { key:'dl', label:'DL', min:0, max:31, step:1, fmt: function(v) { return Math.round(v); } },
-            { key:'d2r', label:'D2R', min:0, max:31, step:1, fmt: function(v) { return Math.round(v); } },
-            { key:'rr', label:'RR', min:0, max:31, step:1, fmt: function(v) { return Math.round(v); } },
-            { key:'feedback', label:'FB', min:0, max:0.5, step:0.01, fmt: function(v) { return v.toFixed(2); } },
-            { key:'mdl', label:'MDL', min:0, max:15, step:1, fmt: function(v) { return Math.round(v); } },
+            { key:'freq_ratio', label:'Ratio', min:0.5, max:16, step:0.001, fmt: function(v) { return v.toFixed(3); },
+              help:'Frequency multiplier relative to the note. 1.0 = fundamental, 2.0 = octave up. Non-integer values create inharmonic timbres.' },
+            { key:'level', label:'Level', min:0, max:1, step:0.01, fmt: function(v) { return v.toFixed(2); },
+              help:'Output level of this operator. For carriers, controls volume. For modulators, controls how much FM modulation is applied.' },
+            { key:'ar', label:'AR', min:0, max:31, step:1, fmt: function(v) { return Math.round(v); },
+              help:'Attack Rate — how fast the sound reaches peak level. 31 = instant attack, lower = slower fade in.' },
+            { key:'d1r', label:'D1R', min:0, max:31, step:1, fmt: function(v) { return Math.round(v); },
+              help:'Decay 1 Rate — how fast the sound drops from peak to the sustain level (DL). 0 = no decay, higher = faster.' },
+            { key:'dl', label:'DL', min:0, max:31, step:1, fmt: function(v) { return Math.round(v); },
+              help:'Decay Level (sustain) — the level held after the first decay. 0 = full volume sustain, 31 = silence.' },
+            { key:'d2r', label:'D2R', min:0, max:31, step:1, fmt: function(v) { return Math.round(v); },
+              help:'Decay 2 Rate — slow decay during the sustain phase. 0 = hold forever, higher = gradual fade.' },
+            { key:'rr', label:'RR', min:0, max:31, step:1, fmt: function(v) { return Math.round(v); },
+              help:'Release Rate — how fast the sound fades after note-off. Higher = faster release, lower = long tail.' },
+            { key:'feedback', label:'FB', min:0, max:0.5, step:0.01, fmt: function(v) { return v.toFixed(2); },
+              help:'Self-feedback — operator modulates itself. Low values add harmonics, higher values create noise/distortion.' },
+            { key:'mdl', label:'MDL', min:0, max:15, step:1, fmt: function(v) { return Math.round(v); },
+              help:'Modulation Depth Level — how strongly the mod source affects this operator. 0 = none, 15 = maximum FM depth.' },
         ];
 
         for (var pi = 0; pi < params.length; pi++) {
             var p = params[pi];
             var row = document.createElement('div'); row.className = 'op-param';
+            if (p.help) row.title = p.help;
             var lbl = document.createElement('label'); lbl.textContent = p.label;
             var inp = document.createElement('input'); inp.type = 'range';
             inp.min = p.min; inp.max = p.max; inp.step = p.step; inp.value = op[p.key] || 0;
@@ -605,6 +648,7 @@ var SCSPEngine = (function() {
 
         // Mod source dropdown
         var msRow = document.createElement('div'); msRow.className = 'op-param';
+        msRow.title = 'Modulation source — which operator modulates this one. Set to "None" for no FM input (use self-feedback instead).';
         var msLbl = document.createElement('label'); msLbl.textContent = 'Mod';
         var msSel = document.createElement('select');
         var msNone = document.createElement('option'); msNone.value = -1; msNone.textContent = 'None'; msSel.appendChild(msNone);
@@ -618,6 +662,7 @@ var SCSPEngine = (function() {
 
         // Waveform dropdown
         var wvRow = document.createElement('div'); wvRow.className = 'op-param';
+        wvRow.title = 'Base waveform for this operator. Sine is classic FM; other waveforms produce different harmonic content.';
         var wvLbl = document.createElement('label'); wvLbl.textContent = 'Wave';
         var wvSel = document.createElement('select');
         for (var wi = 0; wi < WAVE_NAMES.length; wi++) {
@@ -629,6 +674,7 @@ var SCSPEngine = (function() {
 
         // Carrier toggle
         var cRow = document.createElement('div'); cRow.className = 'op-param';
+        cRow.title = 'Carrier operators produce audible output. Uncheck to make this a modulator (shapes timbre of the operator it feeds into via Mod source).';
         var cLbl = document.createElement('label'); cLbl.textContent = 'Carrier';
         var cChk = document.createElement('input'); cChk.type = 'checkbox'; cChk.checked = op.is_carrier;
         cChk.onchange = function() { op.is_carrier = cChk.checked; syncRawRegs(op); _renderInstEditor(container, inst, selectedOp, onChange); };

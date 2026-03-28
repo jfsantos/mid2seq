@@ -10,91 +10,140 @@ Usage:
   python3 saturn_tracker.py                     # Open tracker in browser
   python3 saturn_tracker.py -o tracker.html     # Save to specific file
   python3 saturn_tracker.py --no-open           # Generate without opening
+  python3 saturn_tracker.py --dev -o tracker.html  # Dev mode: external JS files
 
 Architecture: generates a self-contained HTML file with embedded WASM,
 same pattern as fm_editor.py. No server required.
+
+Dev mode (--dev): emits <script src="tools/..."> tags instead of inlining
+JS, so you can edit the JS files and just reload the browser. WASM is
+fetched at runtime. Must be served from the repo root (or use --dev with
+-o to place the HTML there).
 """
 
 import base64
+import json
 import os
 import sys
 import tempfile
 import webbrowser
 
 
-def generate_html():
-    # Load SCSP WASM binary and JS glue
-    wasm_dir = os.path.join(os.path.dirname(__file__), 'scsp_wasm')
-    wasm_path = os.path.join(wasm_dir, 'scsp.wasm')
-    glue_path = os.path.join(wasm_dir, 'scsp.js')
+# JS modules loaded by the tracker, in dependency order.
+# Each entry: (placeholder, filename, fallback)
+_JS_MODULES = [
+    ('ton_io.js',          "var TonIO = null;"),
+    ('note_util.js',       "const NOTE_NAMES = []; function noteName() { return '???'; }"),
+    ('midi_io.js',         "function parseMIDI() { throw new Error('midi_io.js not found'); } function buildMIDI() { throw new Error('midi_io.js not found'); }"),
+    ('seq_io.js',          "function parseSEQ() { throw new Error('seq_io.js not found'); } function buildSEQ() { throw new Error('seq_io.js not found'); }"),
+    ('tracker_state.js',   "var TrackerState = { NUM_CHANNELS: 8, create: function() { return {}; } };"),
+    ('tracker_playback.js',"var TrackerPlayback = { create: function() { return {}; } };"),
+    ('scsp_engine.js',     "var SCSPEngine = {};"),
+    ('tracker_ui.js',      "var TrackerUI = { init: function() {} };"),
+    ('scspdspasm.js',      "function scspdspAssemble(){return {errors:['assembler not found'],mpro:new Uint16Array(512),coef:new Int16Array(64),madrs:new Uint16Array(32),rbl:0,steps:0};}"),
+]
 
-    if os.path.exists(wasm_path) and os.path.exists(glue_path):
-        with open(wasm_path, 'rb') as f:
-            wasm_b64 = base64.b64encode(f.read()).decode('ascii')
-        with open(glue_path, 'r') as f:
-            glue_js = f.read()
-    else:
-        print("[tracker] WARNING: SCSP WASM not found. Run 'make' in tools/scsp_wasm/")
-        wasm_b64 = ""
-        glue_js = "var SCSPModule = () => Promise.resolve(null);"
 
-    # Load reusable JS modules
+def generate_html(bundled=True):
+    """Generate the tracker HTML.
+
+    Args:
+        bundled: If True (default), produce a self-contained HTML with all JS/WASM
+                 inlined.  If False, emit <script src="..."> tags referencing
+                 external files (for development — edit JS and just reload).
+    """
     tools_dir = os.path.dirname(__file__)
-    def load_js(filename, fallback):
+
+    def load_file(filename, mode='r'):
         p = os.path.join(tools_dir, filename)
         if os.path.exists(p):
-            with open(p, 'r') as f:
+            with open(p, mode) as f:
                 return f.read()
-        return fallback
+        return None
 
-    ton_io_js = load_js('ton_io.js', "var TonIO = null;")
-    note_util_js = load_js('note_util.js', "const NOTE_NAMES = []; function noteName() { return '???'; }")
-    midi_io_js = load_js('midi_io.js', "function parseMIDI() { throw new Error('midi_io.js not found'); } function buildMIDI() { throw new Error('midi_io.js not found'); }")
-    seq_io_js = load_js('seq_io.js', "function parseSEQ() { throw new Error('seq_io.js not found'); } function buildSEQ() { throw new Error('seq_io.js not found'); }")
-    tracker_state_js = load_js('tracker_state.js', "var TrackerState = { NUM_CHANNELS: 8, create: function() { return {}; } };")
-    tracker_playback_js = load_js('tracker_playback.js', "var TrackerPlayback = { create: function() { return {}; } };")
-    scsp_engine_js = load_js('scsp_engine.js', "var SCSPEngine = {};")
-    tracker_ui_js = load_js('tracker_ui.js', "var TrackerUI = { init: function() {} };")
+    # ── Build the <script> block that replaces __SCRIPTS__ ──────────
+    script_lines = []
 
-    # Load scspdspasm.js
-    dspasm_path = os.path.join(os.path.dirname(__file__), 'scspdspasm.js')
-    if os.path.exists(dspasm_path):
-        with open(dspasm_path, 'r') as f:
-            dspasm_js = f.read()
+    if bundled:
+        # Inline every JS module
+        for filename, fallback in _JS_MODULES:
+            content = load_file(filename) or fallback
+            script_lines.append(f'<script>\n{content}\n</script>')
+
+        # Inline WASM binary + Emscripten glue
+        wasm_bytes = load_file(os.path.join('scsp_wasm', 'scsp.wasm'), mode='rb')
+        glue_js = load_file(os.path.join('scsp_wasm', 'scsp.js'))
+        if wasm_bytes and glue_js:
+            wasm_b64 = base64.b64encode(wasm_bytes).decode('ascii')
+        else:
+            print("[tracker] WARNING: SCSP WASM not found. Run 'make' in tools/scsp_wasm/")
+            wasm_b64 = ""
+            glue_js = "var SCSPModule = () => Promise.resolve(null);"
+
+        # Embed demo MIDI + example TON files so the JS can reference them
+        demo_midi_b64 = ""
+        demo_path = os.path.join(tools_dir, '..', 'examples', 'kit_demo.mid')
+        if os.path.exists(demo_path):
+            with open(demo_path, 'rb') as f:
+                demo_midi_b64 = base64.b64encode(f.read()).decode('ascii')
+
+        example_tons = {}
+        ton_dir = os.path.join(tools_dir, '..', 'test_ton')
+        if os.path.isdir(ton_dir):
+            for fn in sorted(os.listdir(ton_dir)):
+                if fn.upper().endswith('.TON'):
+                    with open(os.path.join(ton_dir, fn), 'rb') as f:
+                        example_tons[fn] = base64.b64encode(f.read()).decode('ascii')
+
+        # The inlined JS modules contain __DEMO_MIDI_B64__ / __EXAMPLE_TONS_JSON__
+        # placeholders that were baked into tracker_ui.js — patch them now.
+        patched = '\n'.join(script_lines)
+        patched = patched.replace('__DEMO_MIDI_B64__', demo_midi_b64)
+        patched = patched.replace('__EXAMPLE_TONS_JSON__', json.dumps(example_tons))
+        script_lines = [patched]
+
+        script_lines.append(
+            '<script>\n'
+            f"const SCSP_WASM_B64 = '{wasm_b64}';\n"
+            f'{glue_js}\n\n'
+            '// Bootstrap\n'
+            'var state = TrackerState.create(SCSPEngine.getPresets());\n'
+            'var playback = TrackerPlayback.create(state, SCSPEngine);\n'
+            'TrackerUI.init(state, playback, SCSPEngine);\n'
+            '</script>'
+        )
+
     else:
-        dspasm_js = "function scspdspAssemble(){return {errors:['assembler not found'],mpro:new Uint16Array(512),coef:new Int16Array(64),madrs:new Uint16Array(32),rbl:0,steps:0};}"
+        # External script references — for development
+        for filename, _fallback in _JS_MODULES:
+            script_lines.append(f'<script src="tools/{filename}"></script>')
 
-    # Embed demo MIDI and example TON files
-    demo_midi_b64 = ""
-    demo_midi_path = os.path.join(os.path.dirname(__file__), '..', 'examples', 'kit_demo.mid')
-    if os.path.exists(demo_midi_path):
-        with open(demo_midi_path, 'rb') as f:
-            demo_midi_b64 = base64.b64encode(f.read()).decode('ascii')
+        # WASM + glue loaded at runtime via fetch; bootstrap is async
+        script_lines.append(
+            '<script src="tools/scsp_wasm/scsp.js"></script>\n'
+            '<script>\n'
+            '// Dev mode: fetch WASM binary and convert to base64 for the engine\n'
+            '(async function() {\n'
+            '  var resp = await fetch("tools/scsp_wasm/scsp.wasm");\n'
+            '  if (resp.ok) {\n'
+            '    var buf = await resp.arrayBuffer();\n'
+            '    var bytes = new Uint8Array(buf);\n'
+            '    var bin = "";\n'
+            '    for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);\n'
+            '    window.SCSP_WASM_B64 = btoa(bin);\n'
+            '  } else {\n'
+            '    window.SCSP_WASM_B64 = "";\n'
+            '    console.warn("SCSP WASM not found — run make in tools/scsp_wasm/");\n'
+            '  }\n'
+            '  // Bootstrap\n'
+            '  var state = TrackerState.create(SCSPEngine.getPresets());\n'
+            '  var playback = TrackerPlayback.create(state, SCSPEngine);\n'
+            '  TrackerUI.init(state, playback, SCSPEngine);\n'
+            '})();\n'
+            '</script>'
+        )
 
-    example_tons = {}
-    ton_dir = os.path.join(os.path.dirname(__file__), '..', 'test_ton')
-    if os.path.isdir(ton_dir):
-        for fn in sorted(os.listdir(ton_dir)):
-            if fn.upper().endswith('.TON'):
-                with open(os.path.join(ton_dir, fn), 'rb') as f:
-                    example_tons[fn] = base64.b64encode(f.read()).decode('ascii')
-
-    import json
-    tons_json = json.dumps(example_tons)
-
-    html = _HTML_TEMPLATE.replace('__SCSP_WASM_B64__', wasm_b64)
-    html = html.replace('__SCSP_GLUE_JS__', glue_js)
-    html = html.replace('__TON_IO_JS__', ton_io_js)
-    html = html.replace('__NOTE_UTIL_JS__', note_util_js)
-    html = html.replace('__MIDI_IO_JS__', midi_io_js)
-    html = html.replace('__SEQ_IO_JS__', seq_io_js)
-    html = html.replace('__TRACKER_STATE_JS__', tracker_state_js)
-    html = html.replace('__TRACKER_PLAYBACK_JS__', tracker_playback_js)
-    html = html.replace('__SCSP_ENGINE_JS__', scsp_engine_js)
-    html = html.replace('__TRACKER_UI_JS__', tracker_ui_js)
-    html = html.replace('__DSPASM_JS__', dspasm_js)
-    html = html.replace('__DEMO_MIDI_B64__', demo_midi_b64)
-    html = html.replace('__EXAMPLE_TONS_JSON__', tons_json)
+    html = _HTML_TEMPLATE.replace('__SCRIPTS__', '\n'.join(script_lines))
     return html
 
 
@@ -282,6 +331,34 @@ body { font-family: 'SF Mono', Consolas, Monaco, monospace; background: #0a0a1a;
 #status { padding: 4px 12px; background: #12122a; border-top: 1px solid #333; font-size: 10px;
           color: #666; flex-shrink: 0; display: flex; gap: 20px; }
 #status .info { color: #888; }
+
+/* Keyboard overlay */
+#kb-overlay { position: fixed; z-index: 1000; display: none; background: #12122aee;
+              border: 1px solid #00d4ff44; border-radius: 6px; padding: 0; min-width: 340px;
+              box-shadow: 0 4px 20px #000a; backdrop-filter: blur(4px); font-size: 10px; }
+#kb-overlay.visible { display: block; }
+#kb-overlay-header { display: flex; justify-content: space-between; align-items: center; padding: 5px 10px;
+                     cursor: move; background: #1a1a3a; border-radius: 6px 6px 0 0; border-bottom: 1px solid #333;
+                     user-select: none; }
+#kb-overlay-header span { color: #00d4ff; font-weight: bold; font-size: 11px; }
+#kb-overlay-close { background: none; border: none; color: #666; cursor: pointer; font-size: 14px;
+                    font-family: inherit; padding: 0 4px; }
+#kb-overlay-close:hover { color: #f66; }
+#kb-overlay-body { padding: 8px 10px; }
+.kb-section { margin-bottom: 8px; }
+.kb-section-title { color: #00d4ff; font-size: 9px; text-transform: uppercase; letter-spacing: 1px;
+                    margin-bottom: 4px; }
+.kb-row { display: flex; gap: 2px; margin-bottom: 2px; }
+.kb-key { display: inline-flex; align-items: center; justify-content: center; min-width: 22px; height: 22px;
+          background: #1a1a3a; border: 1px solid #333; border-radius: 3px; color: #ccc; font-size: 9px;
+          padding: 0 3px; }
+.kb-key.black { background: #2a1a3a; border-color: #5a3a6a; color: #c8a; }
+.kb-key.white { background: #1a2a3a; border-color: #3a5a6a; color: #8cf; }
+.kb-key.nav { background: #1a2a1e; border-color: #3a5a3e; color: #8c8; }
+.kb-key-label { font-size: 7px; color: #666; margin-left: 2px; }
+.kb-shortcut-row { display: flex; gap: 8px; align-items: center; margin-bottom: 3px; color: #888; }
+.kb-shortcut-row .kb-key { min-width: 18px; height: 18px; font-size: 8px; }
+.kb-shortcut-label { font-size: 9px; }
 </style>
 </head>
 <body>
@@ -317,6 +394,10 @@ body { font-family: 'SF Mono', Consolas, Monaco, monospace; background: #0a0a1a;
     <input id="octave" type="number" value="4" min="1" max="7" style="width:35px;">
   </div>
   <div class="transport-group">
+    <label>Step</label>
+    <input id="edit-step" type="number" value="1" min="0" max="16" style="width:35px;" title="Edit step — rows to advance after entering a note (0 = stay in place)">
+  </div>
+  <div class="transport-group">
     <label>MIDI In</label>
     <select id="midi-input" onchange="selectMidiInput(this.value)">
       <option value="">-- None --</option>
@@ -339,6 +420,8 @@ body { font-family: 'SF Mono', Consolas, Monaco, monospace; background: #0a0a1a;
   </div>
   <span class="transport-sep">|</span>
   <button onclick="toggleDspPanel()" style="color:#4f8;">DSP</button>
+  <span class="transport-sep">|</span>
+  <button id="btn-kb-help" onclick="toggleKbOverlay()" title="Toggle keyboard shortcut overlay (F1)">? Keys</button>
 </div>
 
 <!-- Song arrangement -->
@@ -475,51 +558,108 @@ NOP                                    ' step 6 (even) — align
   <span class="info" id="status-msg"></span>
 </div>
 
-<!-- Reusable modules -->
-<script>
-__TON_IO_JS__
-</script>
-<script>
-__NOTE_UTIL_JS__
-</script>
-<script>
-__MIDI_IO_JS__
-</script>
-<script>
-__SEQ_IO_JS__
-</script>
-<script>
-__TRACKER_STATE_JS__
-</script>
-<script>
-__TRACKER_PLAYBACK_JS__
-</script>
-<script>
-__SCSP_ENGINE_JS__
-</script>
-<script>
-__TRACKER_UI_JS__
-</script>
+__SCRIPTS__
 
-<!-- DSP Assembler -->
-<script>
-__DSPASM_JS__
-</script>
+<!-- Keyboard mapping overlay -->
+<div id="kb-overlay">
+  <div id="kb-overlay-header">
+    <span>Keyboard Map</span>
+    <button id="kb-overlay-close" onclick="toggleKbOverlay()">&times;</button>
+  </div>
+  <div id="kb-overlay-body">
+    <div class="kb-section">
+      <div class="kb-section-title">Piano Keys (lower octave)</div>
+      <div class="kb-row">
+        <span class="kb-key black" style="margin-left:15px;">S<span class="kb-key-label">C#</span></span>
+        <span class="kb-key black">D<span class="kb-key-label">D#</span></span>
+        <span style="width:24px;"></span>
+        <span class="kb-key black">G<span class="kb-key-label">F#</span></span>
+        <span class="kb-key black">H<span class="kb-key-label">G#</span></span>
+        <span class="kb-key black">J<span class="kb-key-label">A#</span></span>
+      </div>
+      <div class="kb-row">
+        <span class="kb-key white">Z<span class="kb-key-label">C</span></span>
+        <span class="kb-key white">X<span class="kb-key-label">D</span></span>
+        <span class="kb-key white">C<span class="kb-key-label">E</span></span>
+        <span class="kb-key white">V<span class="kb-key-label">F</span></span>
+        <span class="kb-key white">B<span class="kb-key-label">G</span></span>
+        <span class="kb-key white">N<span class="kb-key-label">A</span></span>
+        <span class="kb-key white">M<span class="kb-key-label">B</span></span>
+      </div>
+    </div>
+    <div class="kb-section">
+      <div class="kb-section-title">Piano Keys (upper octave)</div>
+      <div class="kb-row">
+        <span class="kb-key black" style="margin-left:15px;">2<span class="kb-key-label">C#</span></span>
+        <span class="kb-key black">3<span class="kb-key-label">D#</span></span>
+        <span style="width:24px;"></span>
+        <span class="kb-key black">5<span class="kb-key-label">F#</span></span>
+        <span class="kb-key black">6<span class="kb-key-label">G#</span></span>
+        <span class="kb-key black">7<span class="kb-key-label">A#</span></span>
+      </div>
+      <div class="kb-row">
+        <span class="kb-key white">Q<span class="kb-key-label">C</span></span>
+        <span class="kb-key white">W<span class="kb-key-label">D</span></span>
+        <span class="kb-key white">E<span class="kb-key-label">E</span></span>
+        <span class="kb-key white">R<span class="kb-key-label">F</span></span>
+        <span class="kb-key white">T<span class="kb-key-label">G</span></span>
+        <span class="kb-key white">Y<span class="kb-key-label">A</span></span>
+        <span class="kb-key white">U<span class="kb-key-label">B</span></span>
+        <span class="kb-key white">I<span class="kb-key-label">C+</span></span>
+        <span class="kb-key white">O<span class="kb-key-label">D+</span></span>
+        <span class="kb-key white">P<span class="kb-key-label">E+</span></span>
+      </div>
+    </div>
+    <div class="kb-section">
+      <div class="kb-section-title">Shortcuts</div>
+      <div class="kb-shortcut-row"><span class="kb-key nav">Space</span> <span class="kb-shortcut-label">Play / Stop</span></div>
+      <div class="kb-shortcut-row"><span class="kb-key nav">&uarr;</span><span class="kb-key nav">&darr;</span> <span class="kb-shortcut-label">Navigate rows</span></div>
+      <div class="kb-shortcut-row"><span class="kb-key nav">&larr;</span><span class="kb-key nav">&rarr;</span> <span class="kb-shortcut-label">Note / Inst / Vol columns</span></div>
+      <div class="kb-shortcut-row"><span class="kb-key nav">Tab</span> <span class="kb-shortcut-label">Next channel</span> &nbsp;<span class="kb-key nav">Shift</span>+<span class="kb-key nav">Tab</span> <span class="kb-shortcut-label">Prev</span></div>
+      <div class="kb-shortcut-row"><span class="kb-key nav">.</span> or <span class="kb-key nav">`</span> <span class="kb-shortcut-label">Note off</span></div>
+      <div class="kb-shortcut-row"><span class="kb-key nav">Del</span> <span class="kb-shortcut-label">Clear cell</span> &nbsp;<span class="kb-key nav">Bksp</span> <span class="kb-shortcut-label">Clear + move up</span></div>
+      <div class="kb-shortcut-row"><span class="kb-key nav">0-F</span> <span class="kb-shortcut-label">Hex input (Inst/Vol columns)</span></div>
+      <div class="kb-shortcut-row"><span class="kb-key nav">F1</span> <span class="kb-shortcut-label">Toggle this overlay</span></div>
+    </div>
+  </div>
+</div>
 
 <script>
-// ═══════════════════════════════════════════════════════════════
-// SCSP ENGINE (shared with fm_editor.py)
-// ═══════════════════════════════════════════════════════════════
+// Keyboard overlay: toggle, drag, F1 shortcut
+function toggleKbOverlay() {
+    var el = document.getElementById('kb-overlay');
+    el.classList.toggle('visible');
+    if (el.classList.contains('visible') && !el.dataset.positioned) {
+        el.style.right = '280px';
+        el.style.top = '60px';
+        el.dataset.positioned = '1';
+    }
+}
 
-const SCSP_WASM_B64 = '__SCSP_WASM_B64__';
-__SCSP_GLUE_JS__
+(function() {
+    var overlay = document.getElementById('kb-overlay');
+    var header = document.getElementById('kb-overlay-header');
+    var dragging = false, ox = 0, oy = 0;
 
+    header.addEventListener('mousedown', function(e) {
+        dragging = true;
+        ox = e.clientX - overlay.offsetLeft;
+        oy = e.clientY - overlay.offsetTop;
+        e.preventDefault();
+    });
+    document.addEventListener('mousemove', function(e) {
+        if (!dragging) return;
+        overlay.style.left = (e.clientX - ox) + 'px';
+        overlay.style.top = (e.clientY - oy) + 'px';
+        overlay.style.right = 'auto';
+    });
+    document.addEventListener('mouseup', function() { dragging = false; });
 
-// Bootstrap
-var state = TrackerState.create(SCSPEngine.getPresets());
-var playback = TrackerPlayback.create(state, SCSPEngine);
-TrackerUI.init(state, playback, SCSPEngine);
-
+    // F1 toggles overlay
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'F1') { e.preventDefault(); toggleKbOverlay(); }
+    });
+})();
 </script>
 </body>
 </html>"""
@@ -530,9 +670,12 @@ def main():
     parser = argparse.ArgumentParser(description='Bebhionn — Saturn SCSP FM Tracker')
     parser.add_argument('-o', '--output', help='Output HTML file')
     parser.add_argument('--no-open', action='store_true', help='Do not open in browser')
+    parser.add_argument('--dev', action='store_true',
+                        help='Dev mode: emit <script src="..."> tags instead of '
+                             'inlining JS. Edit JS files and reload the browser.')
     args = parser.parse_args()
 
-    html = generate_html()
+    html = generate_html(bundled=not args.dev)
 
     if args.output:
         out_path = args.output
