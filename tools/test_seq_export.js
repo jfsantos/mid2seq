@@ -13,50 +13,10 @@
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
+const { parseMIDI } = require('./midi_io.js');
 
 let passed = 0, failed = 0;
 function assert(cond, msg) { if (!cond) { console.error('  FAIL: ' + msg); failed++; } else { passed++; } }
-
-// ── Inline the MIDI parser from the tracker ──
-function parseMIDI(buf) {
-    const d = new DataView(buf);
-    const u8 = new Uint8Array(buf);
-    let pos = 0;
-    function read32() { const v = d.getUint32(pos); pos += 4; return v; }
-    function read16() { const v = d.getUint16(pos); pos += 2; return v; }
-    function read8() { return u8[pos++]; }
-    function readVarLen() {
-        let v = 0;
-        for (let i = 0; i < 4; i++) { const b = read8(); v = (v << 7) | (b & 0x7F); if (!(b & 0x80)) break; }
-        return v;
-    }
-    function readStr(n) { let s = ''; for (let i = 0; i < n; i++) s += String.fromCharCode(read8()); return s; }
-    const hdId = readStr(4); if (hdId !== 'MThd') throw new Error('Not MIDI');
-    read32(); const format = read16(); const nTracks = read16(); const division = read16();
-    const allEvents = [];
-    for (let t = 0; t < nTracks; t++) {
-        const trkId = readStr(4); const trkLen = read32();
-        if (trkId !== 'MTrk') { pos += trkLen; continue; }
-        const trkEnd = pos + trkLen; let absTime = 0, runningStatus = 0;
-        while (pos < trkEnd) {
-            const delta = readVarLen(); absTime += delta;
-            let status = u8[pos];
-            if (status & 0x80) { pos++; if (status < 0xF0) runningStatus = status; } else { status = runningStatus; }
-            const type = status & 0xF0; const ch = status & 0x0F;
-            if (type === 0x90) { const note = read8(); const vel = read8(); allEvents.push({ absTime, ch, type: vel > 0 ? 'on' : 'off', note, vel, status }); }
-            else if (type === 0x80) { const note = read8(); read8(); allEvents.push({ absTime, ch, type: 'off', note, vel: 0, status }); }
-            else if (type === 0xC0) { const prog = read8(); allEvents.push({ absTime, ch, type: 'pc', prog, status }); }
-            else if (type === 0xB0) { const cc = read8(); const val = read8(); allEvents.push({ absTime, ch, type: 'cc', cc, val, status }); }
-            else if (type === 0xE0) { read8(); read8(); }
-            else if (type === 0xD0) { read8(); }
-            else if (type === 0xA0) { read8(); read8(); }
-            else if (status === 0xFF) { const mt = read8(); const ml = readVarLen(); if (mt === 0x51 && ml === 3) { const uspb = (read8()<<16)|(read8()<<8)|read8(); allEvents.push({ absTime, type: 'tempo', bpm: Math.round(60000000/uspb), mspb: uspb }); } else { pos += ml; } }
-            else if (status === 0xF0 || status === 0xF7) { const sl = readVarLen(); pos += sl; }
-        }
-        pos = trkEnd;
-    }
-    return { format, division, events: allEvents };
-}
 
 // ── Inline the SEQ builder from the tracker ──
 function buildSEQFromMidi(midi) {
@@ -89,7 +49,7 @@ function buildSEQFromMidi(midi) {
 
     // Add program changes
     for (const ev of pcs) {
-        events.push({ absTick: ev.absTime, status: ev.status, data1: ev.prog, data2: 0, gateTicks: 0 });
+        events.push({ absTick: ev.absTime, status: 0xC0 | ev.ch, data1: ev.prog, data2: 0, gateTicks: 0 });
     }
 
     // Sort by time, non-note-on events first at same time

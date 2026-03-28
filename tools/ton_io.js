@@ -1,19 +1,81 @@
 /**
- * ton_io.js — Saturn TON file import/export for FM patch editors.
- *
- * Provides two main functions:
- *   exportTon(patches, generateWaveformFn) → Uint8Array
- *   importTon(arrayBuffer) → { patches, pcmChunks }
+ * @module ton_io
+ * @description Saturn TON (tone bank) file import/export for FM synthesis patches.
  *
  * Compatible with saturn_kit.py TON format.
- * Used by both the web FM editor (fm_editor.py) and the VST UI (ui.js).
+ * Used by the web FM editor, tracker (Bebhionn), and SCSP VST plugin UI.
+ *
+ * Exposed as a global `TonIO` object in browsers, or via `module.exports` in Node.js.
+ */
+
+/**
+ * An FM operator / SCSP slot definition within a patch.
+ * @typedef {Object} TonOperator
+ * @property {number}         freq_ratio  - Frequency multiplier relative to base note (e.g. 1.0, 2.0, 0.5)
+ * @property {number}         level       - Amplitude level, 0.0–1.0 (maps to TL register)
+ * @property {number}         ar          - Attack Rate (0–31)
+ * @property {number}         d1r         - Decay 1 Rate (0–63)
+ * @property {number}         dl          - Decay Level (0–63)
+ * @property {number}         d2r         - Decay 2 Rate (0–31)
+ * @property {number}         rr          - Release Rate (0–31)
+ * @property {number}         mdl         - Modulation Depth Level (0–15)
+ * @property {number}         mod_source  - Index of modulator operator, or -1 if none
+ * @property {number}         feedback    - Self-feedback amount (0 or ~0.3)
+ * @property {boolean}        is_carrier  - True if output goes to the mix bus
+ * @property {number|string}  waveform    - Waveform type index (0–9) or name (e.g. `"sine"`, `"sawtooth"`)
+ * @property {number}         loop_mode   - SCSP LPCTL: 0=off, 1=normal, 2=reverse, 3=alternating
+ * @property {number}         loop_start  - Loop start address in samples (LSA)
+ * @property {number}         loop_end    - Loop end address in samples (LEA)
+ */
+
+/**
+ * An operator as returned by {@link TonIO.importTon}, with additional fields
+ * decoded from the binary file.
+ * @typedef {Object} ImportedTonOperator
+ * @extends TonOperator
+ * @property {boolean}      pcm8b   - True if 8-bit PCM, false if 16-bit
+ * @property {Float32Array} pcm     - Decoded audio samples, range [-1.0, 1.0]
+ * @property {Object}       rawRegs - Raw SCSP slot register values for direct hardware programming
+ */
+
+/**
+ * A patch (voice/instrument) containing one or more FM operators.
+ * @typedef {Object} TonPatch
+ * @property {string}          name      - Voice name (e.g. `"Voice 1"`)
+ * @property {TonOperator[]}   operators - Operator definitions for this voice
+ */
+
+/**
+ * A patch as returned by {@link TonIO.importTon}.
+ * @typedef {Object} ImportedTonPatch
+ * @property {string}                name      - Voice name
+ * @property {ImportedTonOperator[]} operators - Operators with decoded PCM and raw registers
+ */
+
+/**
+ * Result of {@link TonIO.importTon}.
+ * @typedef {Object} ImportTonResult
+ * @property {ImportedTonPatch[]} patches - All voices in the TON file
+ */
+
+/**
+ * Callback that generates a waveform by type index.
+ * @callback GenerateWaveformFn
+ * @param {number} waveType   - Builtin waveform index (0=sine, 1=sawtooth, 2=square, etc.)
+ * @param {number} numSamples - Number of samples to generate (typically 1024)
+ * @returns {Float32Array} Audio samples in range [-1.0, 1.0]
  */
 
 const TonIO = (function () {
   'use strict';
 
   const SAMPLE_RATE = 44100; // SCSP playback rate
-  const WAVE_LEN = 1024;    // FM waveforms must be 1024 samples
+
+  /**
+   * Fixed waveform sample count for all FM operator waveforms.
+   * @constant {number}
+   */
+  const WAVE_LEN = 1024;
 
   /** MIDI note → frequency in Hz */
   function midiToFreq(note) {
@@ -101,15 +163,16 @@ const TonIO = (function () {
   }
 
   /**
-   * Export patches to a TON binary.
+   * Encode patches and their waveforms into a Saturn TON binary.
    *
-   * @param {Array} patches - Array of patch objects:
-   *   { name, operators: [{ freq_ratio, level, ar, d1r, dl, d2r, rr,
-   *     mdl, mod_source, feedback, is_carrier, waveform, loop_mode,
-   *     loop_start, loop_end }] }
-   * @param {Function} generateWaveformFn - function(typeIndex, numSamples) → Float32Array
-   * @param {Object} [customWaves] - map of "patchIdx:opIdx" → Float32Array for custom waveforms
-   * @returns {Uint8Array} TON file bytes
+   * Deduplicates identical builtin waveforms across operators.
+   * Custom waveforms (pre-computed or imported PCM) bypass deduplication.
+   *
+   * @param {TonPatch[]}         patches            - Patches to export
+   * @param {GenerateWaveformFn} generateWaveformFn  - Generates builtin waveforms by type index
+   * @param {Object<string, Float32Array>} [customWaves] - Custom waveforms keyed by
+   *   `"patchIdx:opIdx"` (e.g. `"0:2"`), overriding builtin generation for those operators
+   * @returns {Uint8Array} Complete `.ton` file bytes
    */
   function exportTon(patches, generateWaveformFn, customWaves) {
     const voices = [];
@@ -300,11 +363,14 @@ const TonIO = (function () {
   }
 
   /**
-   * Import a TON file and return patches with embedded PCM data.
+   * Decode a Saturn TON binary into patches with embedded PCM samples.
    *
-   * @param {ArrayBuffer} buffer - TON file contents
-   * @returns {Object} { patches: [{ name, operators: [{ freq_ratio, level, ar, d1r, dl, d2r, rr,
-   *   mdl, mod_source, is_carrier, loop_mode, loop_start, loop_end, pcm: Float32Array }] }] }
+   * Each operator's PCM data is extracted from the file and normalized
+   * to Float32Array in [-1.0, 1.0]. Raw SCSP register values are also
+   * preserved for direct slot programming.
+   *
+   * @param {ArrayBuffer} buffer - Raw TON file bytes
+   * @returns {ImportTonResult}
    */
   function importTon(buffer) {
     const data = new Uint8Array(buffer);
@@ -440,9 +506,9 @@ const TonIO = (function () {
   /**
    * Extract a single voice from a TON file by program number.
    *
-   * @param {ArrayBuffer} buffer - TON file contents
-   * @param {number} programNumber - voice index to extract
-   * @returns {Object|null} patch object or null if not found
+   * @param {ArrayBuffer} buffer         - TON file contents
+   * @param {number}      programNumber  - 0-based voice index to extract
+   * @returns {?ImportedTonPatch} Patch object with embedded PCM, or `null` if out of range
    */
   function extractVoice(buffer, programNumber) {
     var result = importTon(buffer);
@@ -454,15 +520,18 @@ const TonIO = (function () {
 
   /**
    * Merge a single patch into an existing TON file at a specific program slot.
-   * Reads the existing TON, replaces the voice at programNumber, rebuilds.
-   * Preserves PCM data from all other voices.
    *
-   * @param {ArrayBuffer} existingBuffer - existing TON file (or null for new kit)
-   * @param {number} programNumber - voice slot to replace (0-based)
-   * @param {Object} newPatch - patch to insert: { name, operators: [...] }
-   * @param {Function} generateWaveformFn - waveform generator for new patch
-   * @param {Object} [newCustomWaves] - custom waves for the new patch (keyed by opIdx)
-   * @returns {Uint8Array} new TON file bytes
+   * Reads the existing TON, replaces the voice at `programNumber`, and
+   * rebuilds the file. PCM data from all other voices is preserved. If
+   * `programNumber` exceeds the current voice count, empty voices fill the gap.
+   *
+   * @param {?ArrayBuffer}       existingBuffer     - Existing TON file, or `null` to create a new kit
+   * @param {number}             programNumber      - 0-based voice slot to replace
+   * @param {TonPatch}           newPatch           - Replacement patch
+   * @param {GenerateWaveformFn} generateWaveformFn - Waveform generator for the new patch
+   * @param {Object<string, Float32Array>} [newCustomWaves] - Custom waveforms keyed by
+   *   operator index (e.g. `"0"`, `"1"`), overriding builtin generation for the new patch
+   * @returns {Uint8Array} New complete `.ton` file bytes
    */
   function mergeTon(existingBuffer, programNumber, newPatch, generateWaveformFn, newCustomWaves) {
     var patches;

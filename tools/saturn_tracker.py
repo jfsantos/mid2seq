@@ -38,13 +38,19 @@ def generate_html():
         wasm_b64 = ""
         glue_js = "var SCSPModule = () => Promise.resolve(null);"
 
-    # Load ton_io.js
-    ton_io_path = os.path.join(os.path.dirname(__file__), 'ton_io.js')
-    if os.path.exists(ton_io_path):
-        with open(ton_io_path, 'r') as f:
-            ton_io_js = f.read()
-    else:
-        ton_io_js = "var TonIO = null;"
+    # Load reusable JS modules
+    tools_dir = os.path.dirname(__file__)
+    def load_js(filename, fallback):
+        p = os.path.join(tools_dir, filename)
+        if os.path.exists(p):
+            with open(p, 'r') as f:
+                return f.read()
+        return fallback
+
+    ton_io_js = load_js('ton_io.js', "var TonIO = null;")
+    note_util_js = load_js('note_util.js', "const NOTE_NAMES = []; function noteName() { return '???'; }")
+    midi_io_js = load_js('midi_io.js', "function parseMIDI() { throw new Error('midi_io.js not found'); } function buildMIDI() { throw new Error('midi_io.js not found'); }")
+    seq_io_js = load_js('seq_io.js', "function parseSEQ() { throw new Error('seq_io.js not found'); } function buildSEQ() { throw new Error('seq_io.js not found'); }")
 
     # Load scspdspasm.js
     dspasm_path = os.path.join(os.path.dirname(__file__), 'scspdspasm.js')
@@ -75,6 +81,9 @@ def generate_html():
     html = _HTML_TEMPLATE.replace('__SCSP_WASM_B64__', wasm_b64)
     html = html.replace('__SCSP_GLUE_JS__', glue_js)
     html = html.replace('__TON_IO_JS__', ton_io_js)
+    html = html.replace('__NOTE_UTIL_JS__', note_util_js)
+    html = html.replace('__MIDI_IO_JS__', midi_io_js)
+    html = html.replace('__SEQ_IO_JS__', seq_io_js)
     html = html.replace('__DSPASM_JS__', dspasm_js)
     html = html.replace('__DEMO_MIDI_B64__', demo_midi_b64)
     html = html.replace('__EXAMPLE_TONS_JSON__', tons_json)
@@ -309,8 +318,10 @@ body { font-family: 'SF Mono', Consolas, Monaco, monospace; background: #0a0a1a;
   <span class="transport-sep">|</span>
   <button onclick="exportTON()">Export TON</button>
   <button onclick="exportSEQ()">Export SEQ</button>
+  <button onclick="exportMIDI()">Export MIDI</button>
   <span class="transport-sep">|</span>
   <button onclick="importMIDI()">Import MIDI</button>
+  <button onclick="importSEQ()">Import SEQ</button>
   <div class="transport-group">
     <label>Instruments:</label>
     <select id="ton-select" onchange="onTonSelect(this.value)">
@@ -456,9 +467,18 @@ NOP                                    ' step 6 (even) — align
   <span class="info" id="status-msg"></span>
 </div>
 
-<!-- TON I/O -->
+<!-- Reusable modules -->
 <script>
 __TON_IO_JS__
+</script>
+<script>
+__NOTE_UTIL_JS__
+</script>
+<script>
+__MIDI_IO_JS__
+</script>
+<script>
+__SEQ_IO_JS__
 </script>
 
 <!-- DSP Assembler -->
@@ -1166,12 +1186,7 @@ function triggerNote(ch, midiNote, instIdx) {
 // NOTE NAMES & KEYBOARD MAPPING
 // ═══════════════════════════════════════════════════════════════
 
-const NOTE_NAMES = ['C-','C#','D-','D#','E-','F-','F#','G-','G#','A-','A#','B-'];
-
-function noteName(midi) {
-    if (midi < 0 || midi > 127) return '???';
-    return NOTE_NAMES[midi % 12] + Math.floor(midi / 12);
-}
+// NOTE_NAMES and noteName() loaded from note_util.js
 
 // ProTracker-style keyboard → note offset mapping
 const KEY_NOTE_MAP = {
@@ -2604,101 +2619,11 @@ syncRawRegs = function(op) {
 };
 
 // ═══════════════════════════════════════════════════════════════
-// MIDI IMPORT
+// MIDI/SEQ IMPORT (parseMIDI from midi_io.js, parseSEQ from seq_io.js)
 // ═══════════════════════════════════════════════════════════════
 
-function parseMIDI(buf) {
-    const d = new DataView(buf);
-    const u8 = new Uint8Array(buf);
-    let pos = 0;
+// parseMIDI loaded from midi_io.js
 
-    function read32() { const v = d.getUint32(pos); pos += 4; return v; }
-    function read16() { const v = d.getUint16(pos); pos += 2; return v; }
-    function read8() { return u8[pos++]; }
-    function readVarLen() {
-        let v = 0;
-        for (let i = 0; i < 4; i++) {
-            const b = read8();
-            v = (v << 7) | (b & 0x7F);
-            if (!(b & 0x80)) break;
-        }
-        return v;
-    }
-    function readStr(n) { let s = ''; for (let i = 0; i < n; i++) s += String.fromCharCode(read8()); return s; }
-
-    // MThd
-    const hdId = readStr(4);
-    if (hdId !== 'MThd') throw new Error('Not a MIDI file');
-    const hdLen = read32();
-    const format = read16();
-    const nTracks = read16();
-    const division = read16();
-
-    // Parse all tracks
-    const allEvents = []; // { absTime, ch, type, note, vel }
-
-    for (let t = 0; t < nTracks; t++) {
-        const trkId = readStr(4);
-        const trkLen = read32();
-        if (trkId !== 'MTrk') { pos += trkLen; continue; }
-
-        const trkEnd = pos + trkLen;
-        let absTime = 0;
-        let runningStatus = 0;
-
-        while (pos < trkEnd) {
-            const delta = readVarLen();
-            absTime += delta;
-
-            let status = u8[pos];
-            if (status & 0x80) {
-                pos++;
-                if (status < 0xF0) runningStatus = status;
-            } else {
-                status = runningStatus;
-            }
-
-            const type = status & 0xF0;
-            const ch = status & 0x0F;
-
-            if (type === 0x90) { // note on
-                const note = read8();
-                const vel = read8();
-                allEvents.push({ absTime, ch, type: vel > 0 ? 'on' : 'off', note, vel });
-            } else if (type === 0x80) { // note off
-                const note = read8();
-                read8(); // vel
-                allEvents.push({ absTime, ch, type: 'off', note, vel: 0 });
-            } else if (type === 0xC0) { // program change
-                const prog = read8();
-                allEvents.push({ absTime, ch, type: 'pc', prog });
-            } else if (type === 0xB0) { // CC
-                read8(); read8(); // controller, value
-            } else if (type === 0xE0) { // pitch bend
-                read8(); read8();
-            } else if (type === 0xD0) { // channel pressure
-                read8();
-            } else if (type === 0xA0) { // poly pressure
-                read8(); read8();
-            } else if (status === 0xFF) { // meta event
-                const metaType = read8();
-                const metaLen = readVarLen();
-                if (metaType === 0x51 && metaLen === 3) { // tempo
-                    const uspb = (read8() << 16) | (read8() << 8) | read8();
-                    allEvents.push({ absTime, type: 'tempo', bpm: Math.round(60000000 / uspb) });
-                } else {
-                    pos += metaLen;
-                }
-            } else if (status === 0xF0 || status === 0xF7) { // sysex
-                const sxLen = readVarLen();
-                pos += sxLen;
-            }
-        }
-        pos = trkEnd;
-    }
-
-    return { format, division, events: allEvents };
-}
 
 function importMIDI() {
     const input = document.createElement('input');
@@ -2717,6 +2642,102 @@ function importMIDI() {
                 showStatus('Imported MIDI: ' + file.name);
             } catch (err) {
                 showStatus('MIDI error: ' + err.message);
+            }
+        };
+        reader.readAsArrayBuffer(file);
+    };
+    input.click();
+}
+
+function seqToPatterns(seq) {
+    const ticksPerStep = seq.resolution / state.stepsPerBeat;
+
+    state.bpm = seq.bpm;
+    document.getElementById('bpm').value = state.bpm;
+
+    const noteOns = seq.events.filter(e => e.type === 'on').sort((a, b) => a.absTime - b.absTime);
+    if (noteOns.length === 0) { showStatus('No notes in SEQ'); return; }
+
+    let lastTime = 0;
+    for (const ev of noteOns) {
+        const end = ev.absTime + (ev.gate || 0);
+        if (end > lastTime) lastTime = end;
+    }
+    const totalSteps = Math.ceil(lastTime / ticksPerStep) + 1;
+
+    const patLen = state.patternLength;
+    const numPatterns = Math.max(1, Math.ceil(totalSteps / patLen));
+
+    const usedChannels = [...new Set(noteOns.map(e => e.ch))].sort((a, b) => a - b);
+    const chMap = {};
+    usedChannels.forEach((seqCh, i) => {
+        if (i < NUM_CHANNELS) chMap[seqCh] = i;
+    });
+
+    state.patterns = [];
+    state.song = [];
+    for (let p = 0; p < numPatterns; p++) {
+        state.patterns.push(createEmptyPattern(patLen));
+        state.song.push(p);
+    }
+
+    for (const ev of noteOns) {
+        const trackerCh = chMap[ev.ch];
+        if (trackerCh === undefined) continue;
+        const globalStep = Math.round(ev.absTime / ticksPerStep);
+        const patIdx = Math.floor(globalStep / patLen);
+        const row = globalStep % patLen;
+        if (patIdx >= state.patterns.length) continue;
+        const cell = state.patterns[patIdx].channels[trackerCh].rows[row];
+        cell.note = ev.note;
+        cell.vol = ev.vel;
+
+        if (ev.gate > 0) {
+            const offStep = Math.round((ev.absTime + ev.gate) / ticksPerStep);
+            const offPatIdx = Math.floor(offStep / patLen);
+            const offRow = offStep % patLen;
+            if (offPatIdx < state.patterns.length) {
+                const offCell = state.patterns[offPatIdx].channels[trackerCh].rows[offRow];
+                if (offCell.note === null) offCell.note = -1;
+            }
+        }
+    }
+
+    const pcEvents = seq.events.filter(e => e.type === 'pc');
+    for (const ev of pcEvents) {
+        const trackerCh = chMap[ev.ch];
+        if (trackerCh === undefined) continue;
+        for (const pat of state.patterns) {
+            if (ev.prog < state.instruments.length) {
+                pat.channels[trackerCh].defaultInst = ev.prog;
+            }
+        }
+    }
+
+    currentSongSlot = 0;
+    state.cursor.row = 0;
+    state.cursor.ch = 0;
+    updateTempo();
+    renderAll();
+}
+
+function importSEQ() {
+    const input = document.createElement('input');
+    input.type = 'file'; input.accept = '.seq,.SEQ';
+    input.style.display = 'none';
+    document.body.appendChild(input);
+    input.onchange = (e) => {
+        const file = e.target.files[0];
+        document.body.removeChild(input);
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+            try {
+                const seq = parseSEQ(ev.target.result);
+                seqToPatterns(seq);
+                showStatus('Imported SEQ: ' + file.name);
+            } catch (err) {
+                showStatus('SEQ error: ' + err.message);
             }
         };
         reader.readAsArrayBuffer(file);
@@ -2856,7 +2877,7 @@ function exportTON() {
 }
 
 function exportSEQ() {
-    const seqData = buildSEQ();
+    const seqData = buildSEQ({ patterns: state.patterns, song: state.song, bpm: state.bpm, stepsPerBeat: state.stepsPerBeat, numChannels: NUM_CHANNELS });
     if (!seqData) return;
     const blob = new Blob([seqData], { type: 'application/octet-stream' });
     const a = document.createElement('a');
@@ -2867,158 +2888,16 @@ function exportSEQ() {
     showStatus('Exported SEQ (' + seqData.length + ' bytes)');
 }
 
-function buildSEQ() {
-    const resolution = 480; // ticks per quarter note (standard MIDI resolution)
-    const ticksPerStep = resolution / state.stepsPerBeat;
-    const mspb = Math.round(60000000 / state.bpm); // microseconds per beat
-
-    // Flatten song → linear event list
-    // Each event: { absTick, status, data1, data2, gateTicks }
-    const events = [];
-    let stepOffset = 0;
-
-    // Collect program changes (one per channel, based on first pattern's defaultInst)
-    const channelInst = {};
-    for (const patIdx of state.song) {
-        const pat = state.patterns[patIdx];
-        for (let ch = 0; ch < NUM_CHANNELS; ch++) {
-            if (!(ch in channelInst)) channelInst[ch] = pat.channels[ch].defaultInst;
-        }
-    }
-
-    // Add program change events at time 0
-    for (const [ch, inst] of Object.entries(channelInst)) {
-        events.push({
-            absTick: 0,
-            status: 0xC0 | parseInt(ch),
-            data1: inst,
-            data2: 0,
-            gateTicks: 0,
-        });
-    }
-
-    // Add note events from all patterns in song order
-    for (const patIdx of state.song) {
-        const pat = state.patterns[patIdx];
-        for (let row = 0; row < pat.length; row++) {
-            for (let ch = 0; ch < NUM_CHANNELS; ch++) {
-                const cell = pat.channels[ch].rows[row];
-                if (cell.note !== null && cell.note >= 0) {
-                    const absTick = Math.round((stepOffset + row) * ticksPerStep);
-
-                    // Compute gate time: steps until next note on same channel, or pattern end
-                    let gateSteps = pat.length - row; // default: rest of pattern
-                    for (let r = row + 1; r < pat.length; r++) {
-                        const next = pat.channels[ch].rows[r];
-                        if (next.note !== null) { gateSteps = r - row; break; }
-                    }
-                    const gateTicks = Math.round(gateSteps * ticksPerStep);
-
-                    events.push({
-                        absTick: absTick,
-                        status: 0x90 | ch,
-                        data1: cell.note,
-                        data2: cell.vol !== null ? cell.vol : 100,
-                        gateTicks: gateTicks,
-                    });
-                }
-            }
-        }
-        stepOffset += pat.length;
-    }
-
-    // Sort: by time, then note-offs before note-ons at same time
-    events.sort((a, b) => {
-        if (a.absTick !== b.absTick) return a.absTick - b.absTick;
-        const aIsNoteOn = (a.status & 0xF0) === 0x90;
-        const bIsNoteOn = (b.status & 0xF0) === 0x90;
-        if (!aIsNoteOn && bIsNoteOn) return -1;
-        if (aIsNoteOn && !bIsNoteOn) return 1;
-        return 0;
-    });
-
-    // Find first musical event time and total time
-    let firstMusicalTick = 0;
-    for (const ev of events) {
-        if ((ev.status & 0xF0) === 0x90) { firstMusicalTick = ev.absTick; break; }
-    }
-    const totalTicks = Math.round(stepOffset * ticksPerStep);
-
-    // Build binary
-    const buf = [];
-    function w8(v) { buf.push(v & 0xFF); }
-    function w16(v) { buf.push((v >> 8) & 0xFF, v & 0xFF); }
-    function w32(v) { buf.push((v >> 24) & 0xFF, (v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF); }
-
-    // Bank header
-    w16(1);       // num_songs = 1
-    w32(6);       // song pointer at offset 6
-
-    // SEQ header
-    const tempoCount = 2;
-    const dataOffset = 8 + tempoCount * 8;
-    w16(resolution);
-    w16(tempoCount);
-    w16(dataOffset);
-    w16(8 + 8); // tempo loop offset → 2nd tempo event
-
-    // Tempo events (2-event convention from mid2seq.c)
-    w32(firstMusicalTick);                  // event 0: time until first note
-    w32(mspb);
-    w32(totalTicks - firstMusicalTick);     // event 1: rest of song
-    w32(mspb);
-
-    // Bank select CC#32 = 1 on all 16 channels
-    for (let ch = 0; ch < 16; ch++) {
-        w8(0xB0 | ch); w8(0x20); w8(1); w8(0x00);
-    }
-
-    // Event stream
-    let lastTick = 0;
-    for (const ev of events) {
-        let delta = ev.absTick - lastTick;
-        lastTick = ev.absTick;
-        const evType = ev.status & 0xF0;
-
-        // Write step extend events for large deltas
-        while (delta >= 0x1000) { w8(0x8F); delta -= 0x1000; }
-        while (delta >= 0x800)  { w8(0x8E); delta -= 0x800; }
-        while (delta >= 0x200)  { w8(0x8D); delta -= 0x200; }
-
-        if (evType === 0x90) {
-            // Note-on: gate extend + control byte + note + vel + gate + delta
-            let gate = ev.gateTicks;
-            while (gate >= 0x2000) { w8(0x8B); gate -= 0x2000; }
-            while (gate >= 0x1000) { w8(0x8A); gate -= 0x1000; }
-            while (gate >= 0x800)  { w8(0x89); gate -= 0x800; }
-            while (gate >= 0x200)  { w8(0x88); gate -= 0x200; }
-
-            let ctl = ev.status & 0x0F;
-            if (delta >= 256) { ctl |= 0x20; delta -= 256; }
-            if (gate >= 256)  { ctl |= 0x40; gate -= 256; }
-
-            w8(ctl);
-            w8(ev.data1);       // note
-            w8(ev.data2);       // velocity
-            w8(gate & 0xFF);    // gate low byte
-            w8(delta & 0xFF);   // delta low byte
-        } else {
-            // Non-note events: 0x8C extend + status + data + delta
-            while (delta >= 256) { w8(0x8C); delta -= 256; }
-            w8(ev.status);
-            if (evType === 0xB0 || evType === 0xA0) {
-                w8(ev.data1); w8(ev.data2);
-            } else if (evType === 0xE0) {
-                w8(ev.data2); // pitch bend MSB
-            } else {
-                w8(ev.data1); // program change, channel pressure
-            }
-            w8(delta & 0xFF);
-        }
-    }
-
-    w8(0x83); // end of track
-    return new Uint8Array(buf);
+function exportMIDI() {
+    const midiData = buildMIDI({ patterns: state.patterns, song: state.song, bpm: state.bpm, stepsPerBeat: state.stepsPerBeat, numChannels: NUM_CHANNELS });
+    if (!midiData) return;
+    const blob = new Blob([midiData], { type: 'audio/midi' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'tracker.mid';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    showStatus('Exported MIDI (' + midiData.length + ' bytes)');
 }
 
 // ═══════════════════════════════════════════════════════════════

@@ -13,6 +13,8 @@
  */
 
 const TonIO = require('./ton_io.js');
+const { parseMIDI } = require('./midi_io.js');
+const { buildSEQ } = require('./seq_io.js');
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
@@ -23,48 +25,6 @@ function assert(cond, msg) {
 }
 function assertClose(a, b, tol, msg) {
     if (Math.abs(a - b) > tol) { console.error('  FAIL: ' + msg + ' (got ' + a + ' expected ' + b + ')'); failed++; } else { passed++; }
-}
-
-// ── Reuse MIDI parser and SEQ builder from test_seq_export.js ──
-
-function parseMIDI(buf) {
-    const d = new DataView(buf);
-    const u8 = new Uint8Array(buf);
-    let pos = 0;
-    function read32() { const v = d.getUint32(pos); pos += 4; return v; }
-    function read16() { const v = d.getUint16(pos); pos += 2; return v; }
-    function read8() { return u8[pos++]; }
-    function readVarLen() {
-        let v = 0;
-        for (let i = 0; i < 4; i++) { const b = read8(); v = (v << 7) | (b & 0x7F); if (!(b & 0x80)) break; }
-        return v;
-    }
-    function readStr(n) { let s = ''; for (let i = 0; i < n; i++) s += String.fromCharCode(read8()); return s; }
-    const hdId = readStr(4); if (hdId !== 'MThd') throw new Error('Not MIDI');
-    read32(); const format = read16(); const nTracks = read16(); const division = read16();
-    const allEvents = [];
-    for (let t = 0; t < nTracks; t++) {
-        const trkId = readStr(4); const trkLen = read32();
-        if (trkId !== 'MTrk') { pos += trkLen; continue; }
-        const trkEnd = pos + trkLen; let absTime = 0, runningStatus = 0;
-        while (pos < trkEnd) {
-            const delta = readVarLen(); absTime += delta;
-            let status = u8[pos];
-            if (status & 0x80) { pos++; if (status < 0xF0) runningStatus = status; } else { status = runningStatus; }
-            const type = status & 0xF0; const ch = status & 0x0F;
-            if (type === 0x90) { const note = read8(); const vel = read8(); allEvents.push({ absTime, ch, type: vel > 0 ? 'on' : 'off', note, vel, status }); }
-            else if (type === 0x80) { const note = read8(); read8(); allEvents.push({ absTime, ch, type: 'off', note, vel: 0, status }); }
-            else if (type === 0xC0) { const prog = read8(); allEvents.push({ absTime, ch, type: 'pc', prog, status }); }
-            else if (type === 0xB0) { read8(); read8(); }
-            else if (type === 0xE0) { read8(); read8(); }
-            else if (type === 0xD0) { read8(); }
-            else if (type === 0xA0) { read8(); read8(); }
-            else if (status === 0xFF) { const mt = read8(); const ml = readVarLen(); if (mt === 0x51 && ml === 3) { const uspb = (read8()<<16)|(read8()<<8)|read8(); allEvents.push({ absTime, type: 'tempo', mspb: uspb }); } else { pos += ml; } }
-            else if (status === 0xF0 || status === 0xF7) { const sl = readVarLen(); pos += sl; }
-        }
-        pos = trkEnd;
-    }
-    return { format, division, events: allEvents };
 }
 
 // ── Waveform generator ──
@@ -103,7 +63,7 @@ function midiToState(midi, instruments, patternLength, stepsPerBeat) {
     const division = midi.division;
     const ticksPerStep = division / stepsPerBeat;
     const tempoEv = midi.events.find(e => e.type === 'tempo');
-    const bpm = tempoEv ? Math.round(60000000 / tempoEv.mspb) : 120;
+    const bpm = tempoEv ? tempoEv.bpm : 120;
 
     const noteOns = midi.events.filter(e => e.type === 'on').sort((a, b) => a.absTime - b.absTime);
     const lastTime = noteOns.length > 0 ? Math.max(...noteOns.map(e => e.absTime)) : 0;
@@ -136,99 +96,7 @@ function midiToState(midi, instruments, patternLength, stepsPerBeat) {
     return { bpm, stepsPerBeat, patternLength, instruments, patterns, song };
 }
 
-function buildSEQ(state) {
-    const resolution = 480;
-    const ticksPerStep = resolution / state.stepsPerBeat;
-    const mspb = Math.round(60000000 / state.bpm);
-    const events = [];
-
-    const channelInst = {};
-    for (const patIdx of state.song) {
-        const pat = state.patterns[patIdx];
-        for (let ch = 0; ch < NUM_CHANNELS; ch++) {
-            if (!(ch in channelInst)) channelInst[ch] = pat.channels[ch].defaultInst;
-        }
-    }
-    for (const [ch, inst] of Object.entries(channelInst)) {
-        events.push({ absTick: 0, status: 0xC0 | parseInt(ch), data1: inst, data2: 0, gateTicks: 0 });
-    }
-
-    let stepOffset = 0;
-    for (const patIdx of state.song) {
-        const pat = state.patterns[patIdx];
-        for (let row = 0; row < pat.length; row++) {
-            for (let ch = 0; ch < NUM_CHANNELS; ch++) {
-                const cell = pat.channels[ch].rows[row];
-                if (cell.note !== null && cell.note >= 0) {
-                    const absTick = Math.round((stepOffset + row) * ticksPerStep);
-                    let gateSteps = pat.length - row;
-                    for (let r = row + 1; r < pat.length; r++) {
-                        if (pat.channels[ch].rows[r].note !== null) { gateSteps = r - row; break; }
-                    }
-                    events.push({
-                        absTick, status: 0x90 | ch, data1: cell.note,
-                        data2: cell.vol !== null ? cell.vol : 100,
-                        gateTicks: Math.round(gateSteps * ticksPerStep),
-                    });
-                }
-            }
-        }
-        stepOffset += pat.length;
-    }
-
-    events.sort((a, b) => {
-        if (a.absTick !== b.absTick) return a.absTick - b.absTick;
-        const aNote = (a.status & 0xF0) === 0x90, bNote = (b.status & 0xF0) === 0x90;
-        if (!aNote && bNote) return -1;
-        if (aNote && !bNote) return 1;
-        return 0;
-    });
-
-    let firstMusicalTick = 0;
-    for (const ev of events) { if ((ev.status & 0xF0) === 0x90) { firstMusicalTick = ev.absTick; break; } }
-    const totalTicks = Math.round(stepOffset * ticksPerStep);
-
-    const buf = [];
-    function w8(v) { buf.push(v & 0xFF); }
-    function w16(v) { buf.push((v >> 8) & 0xFF, v & 0xFF); }
-    function w32(v) { buf.push((v >> 24) & 0xFF, (v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF); }
-
-    w16(1); w32(6);
-    w16(resolution); w16(2); w16(8 + 16); w16(8 + 8);
-    w32(firstMusicalTick); w32(mspb);
-    w32(totalTicks - firstMusicalTick); w32(mspb);
-    for (let ch = 0; ch < 16; ch++) { w8(0xB0 | ch); w8(0x20); w8(1); w8(0x00); }
-
-    let lastTick = 0;
-    for (const ev of events) {
-        let delta = ev.absTick - lastTick;
-        lastTick = ev.absTick;
-        const evType = ev.status & 0xF0;
-        while (delta >= 0x1000) { w8(0x8F); delta -= 0x1000; }
-        while (delta >= 0x800) { w8(0x8E); delta -= 0x800; }
-        while (delta >= 0x200) { w8(0x8D); delta -= 0x200; }
-        if (evType === 0x90) {
-            let gate = ev.gateTicks;
-            while (gate >= 0x2000) { w8(0x8B); gate -= 0x2000; }
-            while (gate >= 0x1000) { w8(0x8A); gate -= 0x1000; }
-            while (gate >= 0x800) { w8(0x89); gate -= 0x800; }
-            while (gate >= 0x200) { w8(0x88); gate -= 0x200; }
-            let ctl = ev.status & 0x0F;
-            if (delta >= 256) { ctl |= 0x20; delta -= 256; }
-            if (gate >= 256) { ctl |= 0x40; gate -= 256; }
-            w8(ctl); w8(ev.data1); w8(ev.data2); w8(gate & 0xFF); w8(delta & 0xFF);
-        } else {
-            while (delta >= 256) { w8(0x8C); delta -= 256; }
-            w8(ev.status);
-            if (evType === 0xB0 || evType === 0xA0) { w8(ev.data1); w8(ev.data2); }
-            else if (evType === 0xE0) { w8(ev.data2); }
-            else { w8(ev.data1); }
-            w8(delta & 0xFF);
-        }
-    }
-    w8(0x83);
-    return new Uint8Array(buf);
-}
+// buildSEQ loaded from tools/seq_io.js
 
 // ═══════════════════════════════════════════════════════════════
 // TEST: Full round-trip
@@ -371,7 +239,7 @@ console.log('  Written to /tmp/test_roundtrip.ton');
 
 // ── Step 6: Export SEQ ──
 console.log('\n--- Step 6: Export SEQ ---');
-const exportedSeq = buildSEQ(state);
+const exportedSeq = buildSEQ({ patterns: state.patterns, song: state.song, bpm: state.bpm, stepsPerBeat: state.stepsPerBeat, numChannels: NUM_CHANNELS });
 assert(exportedSeq.length > 0, 'SEQ export produced data (' + exportedSeq.length + ' bytes)');
 
 // Verify SEQ structure
