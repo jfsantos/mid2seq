@@ -32,11 +32,25 @@ MIDI device.
                                │ SoundEngine │
                                │ interface   │
                                └─────────────┘
+
+                        (optional, engine-specific)
+                               ┌─────────────┐
+                               │ YOUR PANELS │
+                               │             │
+                               │ Detail view,│
+                               │ effects,    │
+                               │ MIDI input  │
+                               └─────────────┘
 ```
 
-The tracker never calls your engine directly except through 11 methods defined
-by the **SoundEngine interface**. Implement those methods and you have a
-working tracker.
+The tracker core never calls your engine directly except through 11 methods
+defined by the **SoundEngine interface**. Implement those methods and you have
+a working tracker.
+
+Optionally, you can ship an **engine-specific panels module** (like
+`scsp_panels.js` for the SCSP engine) that adds detail views, effect editors,
+or MIDI input handling. Panels are initialized separately and use the
+`TrackerUI` public API to read selection state and get notified of changes.
 
 ## The SoundEngine Interface
 
@@ -122,7 +136,12 @@ Build your engine-specific instrument editor into the provided DOM element.
 | `container` | HTMLElement | Empty `<div>` to fill with your editor UI |
 | `inst` | object | The instrument being edited |
 | `selectedOp` | number | Currently selected operator/layer index |
-| `onChange` | function | Call this when the user changes a parameter (re-renders the instrument list) |
+| `onChange` | function | Call when the user changes a parameter (re-renders the instrument list) |
+
+Call `onChange()` with no arguments when a parameter value changes. When the
+user switches to a different operator/layer tab, call `onChange({selectedOp: idx})`
+so the tracker UI can keep its selection state in sync (important for panels
+that depend on which operator is selected).
 
 This is where your engine's personality lives. The SCSP engine builds FM operator
 sliders (AR, D1R, D2R, RR, MDL). A sample-based engine might show a waveform
@@ -377,19 +396,71 @@ Create an HTML file that loads the tracker modules and your engine:
 <!-- Tracker UI -->
 <script src="tools/tracker_ui.js"></script>
 
+<!-- Optional: your engine-specific panels (detail views, effects, MIDI) -->
+<!-- <script src="my_subsynth_panels.js"></script> -->
+
 <!-- Bootstrap -->
 <script>
 var state = TrackerState.create(SubSynthEngine.getPresets());
 var playback = TrackerPlayback.create(state, SubSynthEngine);
 TrackerUI.init(state, playback, SubSynthEngine);
+// If you have panels: MyPanels.init(state, SubSynthEngine, TrackerUI);
 </script>
 </body>
 </html>
 ```
 
-That's it. Three lines of bootstrap. The grid, keyboard input, playback engine,
-MIDI/SEQ import/export, song arrangement — everything works automatically. Your
-engine just handles sound and the instrument editor.
+That's it. Three lines of bootstrap (four if you have panels). The grid,
+keyboard input, playback engine, MIDI/SEQ import/export, song arrangement —
+everything works automatically. Your engine just handles sound and the
+instrument editor.
+
+## Engine-Specific Panels (Optional)
+
+If your engine needs UI beyond the basic sidebar editor — detail views,
+effect editors, hardware-specific controls — create a panels module. The
+SCSP engine ships `scsp_panels.js` which provides:
+
+- **Instrument detail panel**: envelope visualization, waveform preview,
+  operator routing graph
+- **DSP effect editor**: assembler, parameter knobs, EXB import
+- **MIDI input**: Web MIDI API, live performance mode
+
+Your panels module should follow this pattern:
+
+```javascript
+var MyPanels = (function() {
+    var state, engine, ui;
+
+    function init(_state, _engine, _ui) {
+        state = _state;
+        engine = _engine;
+        ui = _ui;
+
+        // Listen for instrument/operator selection changes
+        ui.onSelectionChange(function(instIdx, opIdx) {
+            // Refresh your detail views
+        });
+
+        // Expose onclick handlers to the DOM
+        window.myToggle = myToggle;
+    }
+
+    return { init: init };
+})();
+```
+
+### TrackerUI Public API for Panels
+
+| Method | Description |
+|--------|-------------|
+| `getSelectedInst()` | Current instrument index |
+| `getSelectedOp()` | Current operator/layer index |
+| `setSelectedOp(idx)` | Set operator selection (e.g., from routing graph click) |
+| `onSelectionChange(fn)` | Register callback for inst/op selection changes |
+| `renderInstEditor()` | Re-render the sidebar instrument editor |
+| `renderInstList()` | Re-render the instrument list |
+| `showStatus(msg)` | Show a temporary status message |
 
 ## Instrument Data Model
 
@@ -518,6 +589,7 @@ When building a new engine, verify:
 - [ ] `createDefaultInstrument()` returns a fresh object each time
 - [ ] `renderInstEditor()` clears `container.innerHTML` before building
 - [ ] `renderInstEditor()` calls `onChange()` when parameters change
+- [ ] `renderInstEditor()` calls `onChange({selectedOp: idx})` when switching operator/layer tabs
 - [ ] `getSampleRate()` returns the correct rate for tempo calculation
 
 ## Files Reference
@@ -532,3 +604,5 @@ When building a new engine, verify:
 | `seq_io.js` | Saturn SEQ import/export | Only if targeting Saturn |
 | `ton_io.js` | Saturn TON bank format | Only if targeting Saturn |
 | `scsp_engine.js` | SCSP FM synth engine | No — replace with yours |
+| `scsp_panels.js` | SCSP detail/DSP/MIDI panels | No — SCSP-specific |
+| `scspdspasm.js` | SCSP DSP assembler | No — SCSP-specific |

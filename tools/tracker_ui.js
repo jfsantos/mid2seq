@@ -11,6 +11,7 @@ var TrackerUI = (function() {
     var selectedInst = 0;
     var selectedOp = 0;
     var NUM_CHANNELS, KEY_NOTE_MAP;
+    var selectionChangeListeners = [];
 
     /**
      * @description Initialize the tracker UI. Wires playback callbacks, keyboard handler, builds TON selector, loads demo, and renders.
@@ -66,10 +67,15 @@ var TrackerUI = (function() {
         w.toggleSolo = toggleSolo;
         w.setPatternLength = setPatternLength;
         w.updateTempo = updateTempo;
+        w.selectMidiInput = selectMidiInput;
+        w.toggleMidiLive = toggleMidiLive;
 
         // Initial render
         renderAll();
         updateTempo();
+
+        // Init MIDI input
+        initMidi();
     }
 
     /** @description Convenience wrapper for TrackerState.createEmptyPattern.
@@ -489,7 +495,7 @@ var TrackerUI = (function() {
             div.className = 'inst-item' + (i === selectedInst ? ' sel' : '');
             div.innerHTML = '<span><span class="inst-num">' + i.toString(16).toUpperCase().padStart(2, '0') + '</span>' + inst.name + '</span>' +
                             '<span style="color:#555;">' + inst.operators.length + 'op</span>';
-            div.onclick = () => { selectedInst = i; selectedOp = 0; renderInstList(); renderInstEditor(); };
+            div.onclick = () => { selectedInst = i; selectedOp = 0; renderInstList(); renderInstEditor(); notifySelectionChange(); };
             div.ondblclick = () => {
                 const name = prompt('Rename instrument:', inst.name);
                 if (name) { inst.name = name; renderInstList(); renderChannelHeaders(); }
@@ -503,8 +509,10 @@ var TrackerUI = (function() {
     function renderInstEditor() {
         const el = document.getElementById('inst-editor');
         const inst = state.instruments[selectedInst];
-        engine.renderInstEditor(el, inst, selectedOp, function() {
+        engine.renderInstEditor(el, inst, selectedOp, function(opts) {
+            if (opts && typeof opts.selectedOp === 'number') selectedOp = opts.selectedOp;
             renderInstList();
+            notifySelectionChange();
         });
     }
 
@@ -935,8 +943,125 @@ var TrackerUI = (function() {
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // MIDI KEYBOARD INPUT (Web MIDI API)
+    // ═══════════════════════════════════════════════════════════════
+
+    var midiAccess = null;
+    var activeMidiInput = null;
+    var midiLiveMode = false;
+    var MIDI_LIVE_CH_BASE = 100;
+    var midiLiveNotes = new Map();
+
+    function onMidiMessage(e) {
+        var data = e.data;
+        var status = data[0], note = data[1], velocity = data[2];
+        var cmd = status & 0xF0;
+        var isNoteOn = cmd === 0x90 && velocity > 0;
+        var isNoteOff = cmd === 0x80 || (cmd === 0x90 && velocity === 0);
+
+        if (midiLiveMode) {
+            if (isNoteOn) {
+                engine.init().then(function() {
+                    engine.startAudio(playback);
+                    var ch = MIDI_LIVE_CH_BASE + (note % 16);
+                    midiLiveNotes.set(note, ch);
+                    engine.triggerNote(ch, note, selectedInst, state.instruments[selectedInst]);
+                });
+            } else if (isNoteOff && midiLiveNotes.has(note)) {
+                engine.releaseChannel(midiLiveNotes.get(note));
+                midiLiveNotes.delete(note);
+            }
+        }
+    }
+
+    function toggleMidiLive() {
+        midiLiveMode = !midiLiveMode;
+        var btn = document.getElementById('btn-midi-live');
+        btn.classList.toggle('active', midiLiveMode);
+        if (!midiLiveMode) {
+            midiLiveNotes.forEach(function(ch) { engine.releaseChannel(ch); });
+            midiLiveNotes.clear();
+        }
+    }
+
+    function selectMidiInput(id) {
+        if (activeMidiInput) {
+            activeMidiInput.onmidimessage = null;
+            activeMidiInput = null;
+        }
+        if (!id || !midiAccess) return;
+        var input = midiAccess.inputs.get(id);
+        if (input) {
+            input.onmidimessage = onMidiMessage;
+            activeMidiInput = input;
+        }
+    }
+
+    function refreshMidiDevices() {
+        var sel = document.getElementById('midi-input');
+        if (!sel) return;
+        var prevValue = sel.value;
+        while (sel.options.length > 1) sel.remove(1);
+        if (!midiAccess) return;
+        midiAccess.inputs.forEach(function(input, id) {
+            var opt = document.createElement('option');
+            opt.value = id;
+            opt.textContent = input.name;
+            sel.appendChild(opt);
+        });
+        if (prevValue && midiAccess.inputs.has(prevValue)) {
+            sel.value = prevValue;
+            selectMidiInput(prevValue);
+        } else if (activeMidiInput) {
+            activeMidiInput = null;
+            sel.value = '';
+        }
+    }
+
+    function initMidi() {
+        if (navigator.requestMIDIAccess) {
+            navigator.requestMIDIAccess().then(function(access) {
+                midiAccess = access;
+                refreshMidiDevices();
+                access.onstatechange = function() { refreshMidiDevices(); };
+            }).catch(function(err) { console.warn('Web MIDI not available:', err); });
+        } else {
+            var sel = document.getElementById('midi-input');
+            if (sel) {
+                sel.options[0].textContent = '-- Not supported (use Chrome) --';
+                sel.disabled = true;
+            }
+            var btn = document.getElementById('btn-midi-live');
+            if (btn) btn.disabled = true;
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // SELECTION CHANGE NOTIFICATIONS
+    // ═══════════════════════════════════════════════════════════════
+
+    function notifySelectionChange() {
+        for (var i = 0; i < selectionChangeListeners.length; i++) {
+            selectionChangeListeners[i](selectedInst, selectedOp);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // INIT
     // ═══════════════════════════════════════════════════════════════
 
-    return { init: init };
+    return {
+        init: init,
+        getSelectedInst: function() { return selectedInst; },
+        setSelectedInst: function(v) { selectedInst = v; },
+        getSelectedOp: function() { return selectedOp; },
+        setSelectedOp: function(v) { selectedOp = v; },
+        /** @description Register a listener called when instrument or operator selection changes.
+         *  @param {function(number,number)} fn - callback(selectedInst, selectedOp) */
+        onSelectionChange: function(fn) { selectionChangeListeners.push(fn); },
+        renderInstEditor: renderInstEditor,
+        renderInstList: renderInstList,
+        renderChannelHeaders: renderChannelHeaders,
+        showStatus: showStatus,
+    };
 })();

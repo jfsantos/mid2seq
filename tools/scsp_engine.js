@@ -46,6 +46,7 @@ var SCSPEngine = (function() {
     var actx = null, fmNode = null, fmGain = null;
     var playbackRef = null;
     var waveStore = { waves: [], nextOffset: 0 };
+    var slotPostProgramHook = null; // called after each slot is programmed: fn(slot)
 
     // ── Preset instruments ─────────────────────────────────────────────
     var PRESET_INSTRUMENTS = [
@@ -332,7 +333,9 @@ var SCSPEngine = (function() {
         scsp._scsp_write_slot(slot, 0x8, octBits);
         scsp._scsp_write_slot(slot, 0x9, 0);
         scsp._scsp_write_slot(slot, 0xA, 0);
-        scsp._scsp_write_slot(slot, 0xB, dB);
+        // Write DISDL/DIPAN (upper byte of 0xB) preserving EFSDL/EFPAN (lower byte)
+        scsp._scsp_slot_set_direct_output(slot, disdl, dipan);
+        if (slotPostProgramHook) slotPostProgramHook(slot);
     }
 
     // ── programSlotRaw ─────────────────────────────────────────────────
@@ -384,7 +387,11 @@ var SCSPEngine = (function() {
         scsp._scsp_write_slot(slot, 0x8, octBits);
         scsp._scsp_write_slot(slot, 0x9, 0);
         scsp._scsp_write_slot(slot, 0xA, 0);
-        scsp._scsp_write_slot(slot, 0xB, rawRegs.dB & 0xFF00);
+        // Write DISDL/DIPAN (upper byte) preserving EFSDL/EFPAN (lower byte)
+        var disdlR = (rawRegs.dB >> 13) & 7;
+        var dipanR = (rawRegs.dB >> 8) & 0x1F;
+        scsp._scsp_slot_set_direct_output(slot, disdlR, dipanR);
+        if (slotPostProgramHook) slotPostProgramHook(slot);
     }
 
     // ── syncRawRegs ────────────────────────────────────────────────────
@@ -550,7 +557,7 @@ var SCSPEngine = (function() {
             tab.className = 'op-tab' + (i === selectedOp ? ' sel' : '') + (inst.operators[i].is_carrier ? ' carrier' : '');
             tab.textContent = 'Op' + (i + 1);
             tab.title = inst.operators[i].is_carrier ? 'Carrier — outputs audio directly' : 'Modulator — shapes other operators\' timbre via FM';
-            tab.onclick = (function(idx) { return function() { _renderInstEditor(container, inst, idx, onChange); }; })(i);
+            tab.onclick = (function(idx) { return function() { _renderInstEditor(container, inst, idx, onChange); if (onChange) onChange({selectedOp: idx}); }; })(i);
             tabBar.appendChild(tab);
         }
         var addOp = document.createElement('span');
@@ -823,6 +830,192 @@ var SCSPEngine = (function() {
 
         /** @description Exposed waveform generator for TON export. See {@link generateWaveform}. */
         generateWaveform: generateWaveform,
+
+        // ── Constants for instrument detail / panels ──────────────
+
+        /** @constant {string[]} Loop mode names */
+        LOOP_NAMES: ['Off', 'Forward', 'Reverse', 'Ping-pong'],
+
+        /** @constant {number[]} Attack rate → milliseconds lookup (index 0-31) */
+        AR_TIMES: [
+            100000, 100000, 8100, 6900, 6000, 4800, 4000, 3400,
+            3000, 2400, 2000, 1700, 1500, 1200, 1000, 860,
+            760, 600, 500, 430, 380, 300, 250, 220,
+            190, 150, 130, 110, 95, 76, 63, 55
+        ],
+
+        /** @constant {number[]} Decay/release rate → milliseconds lookup (index 0-31) */
+        DR_TIMES: [
+            100000, 100000, 118200, 101300, 88600, 70900, 59100, 50700,
+            44300, 35500, 29600, 25300, 22200, 17700, 14800, 12700,
+            11100, 8900, 7400, 6300, 5500, 4400, 3700, 3200,
+            2800, 2200, 1800, 1600, 1400, 1100, 920, 790
+        ],
+
+        // ── Custom wave and waveform store access ─────────────────
+
+        /** @description Per-operator custom wave storage (keyed by "instIdx_opIdx").
+         *  @type {Object<string, Float32Array>} */
+        customWaves: {},
+
+        /** @description Get waveform length for a given wave index.
+         *  @param {number} wid - Waveform index
+         *  @returns {number} Length in samples */
+        getWaveLength: function(wid) {
+            var w = waveStore.waves[wid] || waveStore.waves[0];
+            return w ? w.length : WAVE_LEN;
+        },
+
+        /** @description Add a custom waveform to the wave store (writes PCM into SCSP RAM).
+         *  @param {Float32Array} samples - Waveform data (-1..1)
+         *  @param {number} loopStart
+         *  @param {number} loopEnd
+         *  @param {number} loopMode
+         *  @returns {number} New waveform index */
+        addWaveform: function(samples, loopStart, loopEnd, loopMode) {
+            if (!scsp) return 0;
+            var ramPtr = scsp._scsp_get_ram_ptr();
+            return waveStoreAdd(ramPtr, samples, loopStart, loopEnd, loopMode);
+        },
+
+        /** @description Sync an operator's rawRegs from its high-level params. */
+        syncRawRegs: syncRawRegs,
+
+        /** @description Read PCM samples from SCSP RAM.
+         *  @param {number} byteOffset - Start address in SCSP RAM
+         *  @param {number} numSamples - Number of samples to read
+         *  @param {boolean} pcm8b - True for 8-bit, false for 16-bit
+         *  @returns {?Float32Array} Normalized samples, or null if engine not ready */
+        readRamPCM: function(byteOffset, numSamples, pcm8b) {
+            if (!scsp) return null;
+            var ramPtr = scsp._scsp_get_ram_ptr();
+            var out = new Float32Array(numSamples);
+            if (pcm8b) {
+                for (var i = 0; i < numSamples; i++) {
+                    var addr = ramPtr + byteOffset + i;
+                    var swapped = (i & 1) ? addr - 1 : addr + 1;
+                    var s8 = scsp.HEAPU8[swapped];
+                    out[i] = ((s8 << 24) >> 24) / 128;
+                }
+            } else {
+                for (var i = 0; i < numSamples; i++) {
+                    var addr = ramPtr + byteOffset + i * 2;
+                    var s16 = scsp.HEAPU8[addr] | (scsp.HEAPU8[addr + 1] << 8);
+                    out[i] = ((s16 << 16) >> 16) / 32768;
+                }
+            }
+            return out;
+        },
+
+        /** @description Update SCSP slot registers for any currently-previewing voices
+         *  after parameter changes. Only affects test/live-preview channels.
+         *  @param {Object[]} instruments - Full instruments array
+         *  @param {number} instIdx - Which instrument was changed
+         *  @param {number} opIdx - Which operator was changed */
+        liveUpdatePreview: function(instruments, instIdx, opIdx) {
+            if (!scsp) return;
+            var inst = instruments[instIdx];
+            if (!inst) return;
+            var ops = inst.operators;
+            for (var vi = 0; vi < voiceAlloc.voices.length; vi++) {
+                var v = voiceAlloc.voices[vi];
+                if (v.ch === 99 || v.ch >= 100) {
+                    if (v.slots.length !== ops.length) continue;
+                    var slotBase = v.slots[0];
+                    for (var i = 0; i < ops.length; i++) {
+                        var op = ops[i];
+                        if (op.rawRegs) {
+                            if (op.useTonSA) {
+                                var origSA = ((op.rawRegs.d0 & 0x0F) << 16) | op.rawRegs.sa;
+                                programSlotRaw(v.slots[i], op.rawRegs, v.note, origSA, slotBase, i, op.rawRegs.lea, op.mod_source);
+                            } else {
+                                var wav = waveStore.waves[op.waveform || 0] || waveStore.waves[0];
+                                programSlotRaw(v.slots[i], op.rawRegs, v.note, wav.offset, slotBase, i, wav.length, op.mod_source);
+                            }
+                        } else {
+                            programSlot(v.slots[i], op, v.note, ops);
+                        }
+                    }
+                }
+            }
+        },
+
+        // ── DSP abstraction ───────────────────────────────────────
+
+        /** @description Load assembled DSP program into SCSP.
+         *  @param {Uint16Array} mpro - Microprogram words
+         *  @param {Int16Array} coef - Coefficient table
+         *  @param {Uint16Array} madrs - Memory address table
+         *  @param {number} rbl - Ring buffer length selector (0-3)
+         *  @returns {boolean} True if loaded */
+        dspLoadProgram: function(mpro, coef, madrs, rbl) {
+            if (!scsp) return false;
+            var mproPtr = scsp._malloc(mpro.byteLength);
+            var coefPtr = scsp._malloc(coef.byteLength);
+            var madrsPtr = scsp._malloc(madrs.byteLength);
+            scsp.HEAPU16.set(mpro, mproPtr >> 1);
+            scsp.HEAP16.set(coef, coefPtr >> 1);
+            scsp.HEAPU16.set(madrs, madrsPtr >> 1);
+            scsp._scsp_dsp_load_arrays(mproPtr, mpro.length, coefPtr, coef.length,
+                                        madrsPtr, madrs.length, rbl);
+            scsp._free(mproPtr);
+            scsp._free(coefPtr);
+            scsp._free(madrsPtr);
+            return true;
+        },
+
+        /** @description Load a binary EXB DSP program file.
+         *  @param {Uint8Array} bytes - Raw EXB data
+         *  @returns {boolean} True if loaded */
+        dspLoadExb: function(bytes) {
+            if (!scsp) return false;
+            var ptr = scsp._malloc(bytes.byteLength);
+            scsp.HEAPU8.set(bytes, ptr);
+            scsp._scsp_dsp_load_exb(ptr, bytes.byteLength);
+            scsp._free(ptr);
+            return true;
+        },
+
+        dspStart: function() { if (scsp) scsp._scsp_dsp_start(); },
+        dspStop: function() { if (scsp) scsp._scsp_dsp_stop(); },
+        dspClear: function() { if (scsp) scsp._scsp_dsp_clear(); },
+
+        dspGetCoef: function(idx) { return scsp ? scsp._scsp_dsp_get_coef(idx) : 0; },
+        dspSetCoef: function(idx, val) { if (scsp) scsp._scsp_dsp_set_coef(idx, val); },
+        dspGetMadrs: function(idx) { return scsp ? scsp._scsp_dsp_get_madrs(idx) : 0; },
+        dspSetMadrs: function(idx, val) { if (scsp) scsp._scsp_dsp_set_madrs(idx, val); },
+
+        /** @description Set effect send level (IMXL) for a slot.
+         *  @param {number} slot - Slot index (0-31)
+         *  @param {number} level - Send level (0-7) */
+        dspSetSlotSend: function(slot, level) {
+            if (scsp) scsp._scsp_slot_set_effect_send(slot, 0, level);
+        },
+
+        /** @description Set effect output (EFSDL/EFPAN) for a slot.
+         *  @param {number} slot - Slot index
+         *  @param {number} efsdl - Effect send direct level
+         *  @param {number} efpan - Effect pan */
+        dspSetSlotOutput: function(slot, efsdl, efpan) {
+            if (scsp) scsp._scsp_slot_set_effect_output(slot, efsdl, efpan);
+        },
+
+        /** @description Write a raw register value to a slot.
+         *  @param {number} slot - Slot index
+         *  @param {number} reg - Register offset
+         *  @param {number} val - 16-bit value */
+        dspWriteSlotReg: function(slot, reg, val) {
+            if (scsp) scsp._scsp_write_slot(slot, reg, val);
+        },
+
+        /** @description Check if the SCSP WASM module is initialized.
+         *  @returns {boolean} */
+        isReady: function() { return scspReady; },
+
+        /** @description Register a callback invoked after each slot is programmed (note-on).
+         *  Used by the DSP panels to inject effect send levels into register 0xA.
+         *  @param {?function(number)} fn - callback receiving the slot number, or null to clear */
+        setSlotPostProgramHook: function(fn) { slotPostProgramHook = fn; },
     };
 
     return api;

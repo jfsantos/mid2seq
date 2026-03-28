@@ -40,6 +40,7 @@ _JS_MODULES = [
     ('tracker_playback.js',"var TrackerPlayback = { create: function() { return {}; } };"),
     ('scsp_engine.js',     "var SCSPEngine = {};"),
     ('tracker_ui.js',      "var TrackerUI = { init: function() {} };"),
+    ('scsp_panels.js',  "var SCSPPanels = { init: function() {} };"),
     ('scspdspasm.js',      "function scspdspAssemble(){return {errors:['assembler not found'],mpro:new Uint16Array(512),coef:new Int16Array(64),madrs:new Uint16Array(32),rbl:0,steps:0};}"),
 ]
 
@@ -110,6 +111,7 @@ def generate_html(bundled=True):
             'var state = TrackerState.create(SCSPEngine.getPresets());\n'
             'var playback = TrackerPlayback.create(state, SCSPEngine);\n'
             'TrackerUI.init(state, playback, SCSPEngine);\n'
+            'SCSPPanels.init(state, SCSPEngine, TrackerUI);\n'
             '</script>'
         )
 
@@ -139,6 +141,7 @@ def generate_html(bundled=True):
             '  var state = TrackerState.create(SCSPEngine.getPresets());\n'
             '  var playback = TrackerPlayback.create(state, SCSPEngine);\n'
             '  TrackerUI.init(state, playback, SCSPEngine);\n'
+            '  SCSPPanels.init(state, SCSPEngine, TrackerUI);\n'
             '})();\n'
             '</script>'
         )
@@ -157,10 +160,33 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
 body { font-family: 'SF Mono', Consolas, Monaco, monospace; background: #0a0a1a; color: #ccc;
        display: flex; flex-direction: column; height: 100vh; overflow: hidden; user-select: none; }
 
+/* Menu bar */
+#menubar { display: flex; align-items: center; padding: 0 8px; background: #0e0e22;
+           border-bottom: 1px solid #222; flex-shrink: 0; font-size: 11px; height: 24px; }
+#menubar h1 { color: #00d4ff; font-size: 12px; margin-right: 12px; padding: 0 6px; }
+.menu-item { position: relative; }
+.menu-item > button { background: none; border: none; color: #999; cursor: pointer; padding: 3px 10px;
+                      font-family: inherit; font-size: 11px; border-radius: 2px; }
+.menu-item > button:hover, .menu-item.open > button { background: #1a1a3a; color: #ccc; }
+.menu-dropdown { display: none; position: absolute; top: 100%; left: 0; min-width: 180px; z-index: 900;
+                 background: #16162e; border: 1px solid #333; border-radius: 0 0 4px 4px;
+                 box-shadow: 0 4px 12px #000a; padding: 4px 0; }
+.menu-item.open .menu-dropdown { display: block; }
+.menu-dropdown button { display: block; width: 100%; text-align: left; background: none; border: none;
+                        color: #bbb; padding: 5px 14px; font-family: inherit; font-size: 11px;
+                        cursor: pointer; white-space: nowrap; }
+.menu-dropdown button:hover { background: #2a2a5a; color: #fff; }
+.menu-dropdown .menu-sep { height: 1px; background: #333; margin: 4px 8px; }
+.menu-dropdown .menu-section { padding: 4px 14px; display: flex; align-items: center; gap: 6px; }
+.menu-dropdown .menu-section label { font-size: 10px; color: #888; white-space: nowrap; }
+.menu-dropdown .menu-section select { background: #222; color: #ccc; border: 1px solid #444;
+                                       font-family: inherit; font-size: 10px; border-radius: 2px;
+                                       padding: 1px 3px; flex: 1; max-width: 140px; }
+.menu-dropdown .menu-kbd { float: right; color: #555; font-size: 10px; margin-left: 20px; }
+
 /* Transport bar */
-#transport { display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+#transport { display: flex; align-items: center; gap: 10px; padding: 6px 12px;
              background: #12122a; border-bottom: 1px solid #333; flex-shrink: 0; }
-#transport h1 { color: #00d4ff; font-size: 13px; margin-right: 8px; }
 #transport button { background: #2a2a4e; color: #ccc; border: 1px solid #444; padding: 4px 12px;
                      cursor: pointer; border-radius: 3px; font-family: inherit; font-size: 11px; }
 #transport button:hover { background: #3a3a5e; }
@@ -363,9 +389,60 @@ body { font-family: 'SF Mono', Consolas, Monaco, monospace; background: #0a0a1a;
 </head>
 <body>
 
+<!-- Menu bar -->
+<div id="menubar">
+  <h1>Bebhionn</h1>
+  <div class="menu-item" id="menu-file">
+    <button onclick="menuToggle('menu-file')">File</button>
+    <div class="menu-dropdown">
+      <button onclick="importSEQ(); menuClose()">Import SEQ...</button>
+      <button onclick="importTonForTracker(); menuClose()">Import TON...</button>
+      <div class="menu-sep"></div>
+      <button onclick="exportSEQ(); menuClose()">Export SEQ</button>
+      <button onclick="exportTON(); menuClose()">Export TON</button>
+      <div class="menu-sep"></div>
+      <div class="menu-section">
+        <label>Instruments:</label>
+        <select id="ton-select" onchange="onTonSelect(this.value)">
+          <option value="">-- Select TON --</option>
+        </select>
+      </div>
+    </div>
+  </div>
+  <div class="menu-item" id="menu-view">
+    <button onclick="menuToggle('menu-view')">View</button>
+    <div class="menu-dropdown">
+      <button onclick="toggleDspPanel(); menuClose()">DSP Effect Panel</button>
+      <button onclick="toggleInstDetail(); menuClose()">Instrument Detail</button>
+      <div class="menu-sep"></div>
+      <button onclick="toggleKbOverlay(); menuClose()">Keyboard Map <span class="menu-kbd">F1</span></button>
+    </div>
+  </div>
+  <div class="menu-item" id="menu-midi">
+    <button onclick="menuToggle('menu-midi')">MIDI</button>
+    <div class="menu-dropdown">
+      <div class="menu-section">
+        <label>Input:</label>
+        <select id="midi-input" onchange="selectMidiInput(this.value)">
+          <option value="">-- None --</option>
+        </select>
+      </div>
+      <button id="btn-midi-live" onclick="toggleMidiLive(); menuClose()">Live Mode</button>
+      <div class="menu-sep"></div>
+      <button onclick="importMIDI(); menuClose()">Import MIDI...</button>
+      <button onclick="exportMIDI(); menuClose()">Export MIDI</button>
+    </div>
+  </div>
+  <div class="menu-item" id="menu-help">
+    <button onclick="menuToggle('menu-help')">Help</button>
+    <div class="menu-dropdown">
+      <button onclick="toggleKbOverlay(); menuClose()">Keyboard Shortcuts <span class="menu-kbd">F1</span></button>
+    </div>
+  </div>
+</div>
+
 <!-- Transport -->
 <div id="transport">
-  <h1>Bebhionn</h1>
   <button id="btn-play" onclick="togglePlay()">&#9654; Play</button>
   <button id="btn-stop" onclick="stopPlayback()">&#9632; Stop</button>
   <span class="transport-sep">|</span>
@@ -397,31 +474,6 @@ body { font-family: 'SF Mono', Consolas, Monaco, monospace; background: #0a0a1a;
     <label>Step</label>
     <input id="edit-step" type="number" value="1" min="0" max="16" style="width:35px;" title="Edit step — rows to advance after entering a note (0 = stay in place)">
   </div>
-  <div class="transport-group">
-    <label>MIDI In</label>
-    <select id="midi-input" onchange="selectMidiInput(this.value)">
-      <option value="">-- None --</option>
-    </select>
-    <button id="btn-midi-live" onclick="toggleMidiLive()">Live</button>
-  </div>
-  <span class="transport-sep">|</span>
-  <button onclick="exportTON()">Export TON</button>
-  <button onclick="exportSEQ()">Export SEQ</button>
-  <button onclick="exportMIDI()">Export MIDI</button>
-  <span class="transport-sep">|</span>
-  <button onclick="importMIDI()">Import MIDI</button>
-  <button onclick="importSEQ()">Import SEQ</button>
-  <div class="transport-group">
-    <label>Instruments:</label>
-    <select id="ton-select" onchange="onTonSelect(this.value)">
-      <option value="">-- Select TON --</option>
-    </select>
-    <button onclick="importTonForTracker()">Browse...</button>
-  </div>
-  <span class="transport-sep">|</span>
-  <button onclick="toggleDspPanel()" style="color:#4f8;">DSP</button>
-  <span class="transport-sep">|</span>
-  <button id="btn-kb-help" onclick="toggleKbOverlay()" title="Toggle keyboard shortcut overlay (F1)">? Keys</button>
 </div>
 
 <!-- Song arrangement -->
@@ -454,7 +506,6 @@ body { font-family: 'SF Mono', Consolas, Monaco, monospace; background: #0a0a1a;
         <button onclick="addInstrument()">+New</button>
         <button onclick="dupInstrument()">Dup</button>
         <button onclick="delInstrument()">Del</button>
-        <button onclick="importTonInst()">Load TON</button>
         <button onclick="toggleInstDetail()" style="background:#2a3a4e;color:#4cf;">Edit</button>
       </div>
       <div id="inst-editor"></div>
@@ -625,6 +676,31 @@ __SCRIPTS__
 </div>
 
 <script>
+// Menu bar: toggle dropdowns, close on outside click
+function menuToggle(id) {
+    var item = document.getElementById(id);
+    var wasOpen = item.classList.contains('open');
+    menuClose();
+    if (!wasOpen) item.classList.add('open');
+}
+function menuClose() {
+    var items = document.querySelectorAll('.menu-item.open');
+    for (var i = 0; i < items.length; i++) items[i].classList.remove('open');
+}
+// Hovering over sibling menu items while one is open switches the dropdown
+document.getElementById('menubar').addEventListener('mouseover', function(e) {
+    if (!document.querySelector('.menu-item.open')) return;
+    var item = e.target.closest('.menu-item');
+    if (item && !item.classList.contains('open')) {
+        menuClose();
+        item.classList.add('open');
+    }
+});
+// Click outside closes menus
+document.addEventListener('mousedown', function(e) {
+    if (!e.target.closest('#menubar')) menuClose();
+});
+
 // Keyboard overlay: toggle, drag, F1 shortcut
 function toggleKbOverlay() {
     var el = document.getElementById('kb-overlay');
