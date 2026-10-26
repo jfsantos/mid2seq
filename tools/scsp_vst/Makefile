@@ -65,7 +65,27 @@ TARGETS += clap vst3 lv2_sep
 ui/ton_io.js: ../ton_io.js
 	cp $< $@
 
+# macOS code signing
+#
+# The linker signs only the binary, but the web UI files are copied into
+# Contents/Resources afterwards, so the bundle's signature doesn't cover them.
+# Ableton Live checks the bundle signature and rejects the plugin with "code has
+# no resources but signature indicates they must be present". Re-signing the
+# whole bundle as the last build step fixes that. The default "-" is an ad-hoc
+# signature; pass a Developer ID identity to sign for distribution.
+MACOS_CODESIGN_IDENTITY ?= -
+
+# The recipe runs only after every prerequisite is done (also with make -j),
+# so the bundles are complete when they get signed.
 all: ui/ton_io.js $(TARGETS) $(DPF_WEBUI_TARGET)
+ifeq ($(MACOS),true)
+	@for b in $(DPF_TARGET_DIR)/$(NAME).vst3 $(DPF_TARGET_DIR)/$(NAME).clap; do \
+		if [ -d "$$b" ]; then \
+			echo "Signing $$b"; \
+			codesign --force --sign "$(MACOS_CODESIGN_IDENTITY)" "$$b" || exit 1; \
+		fi; \
+	done
+endif
 
 clean:
 	rm -rf $(DPF_BUILD_DIR) $(DPF_TARGET_DIR) ui/ton_io.js
